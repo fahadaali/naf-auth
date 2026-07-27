@@ -1,0 +1,95 @@
+name: الإصدار
+
+# يعمل عند الدمج في main فقط.
+# CHANGELOG.md مستثنى: التزام السجلّ الذي ينتجه هذا السير لا يعيد تشغيله.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - CHANGELOG.md
+
+# إصدار واحد في كل مرة. دمجان متتاليان لا ينتجان وسمين متسابقين.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: سحب المستودع بتاريخه كاملاً
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: تهيئة Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: تركيب الحزم
+        run: npm ci
+
+      # هذا السير يُوزَّع على المنصات الخمس أيضاً، وهي لا تحوي registry.json.
+      # خطوتا السجلّ أدناه تعملان في مستودع السجلّ وحده؛ وفي المنصة يبقى
+      # اشتقاق الإصدار وتوليد سجلّ التغييرات كما هما.
+      - name: هل هذا مستودع سجلّ؟
+        id: is_registry
+        run: |
+          if [ -f registry.json ]; then
+            echo "yes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "yes=false" >> "$GITHUB_OUTPUT"
+            echo "لا registry.json — مستودع منصة. تُتخطّى بوابة السجلّ."
+          fi
+
+      # البوابة. لا يصدر إصدار من سجلّ معطوب.
+      - name: التحقق من صحة السجلّ
+        if: steps.is_registry.outputs.yes == 'true'
+        run: npx shadcn registry validate ./registry.json
+
+      - name: إعادة بناء ملفات السجلّ والتأكد من مطابقتها
+        if: steps.is_registry.outputs.yes == 'true'
+        run: |
+          npx shadcn build
+          if ! git diff --quiet -- public/r; then
+            echo "::error::ملفات public/r غير مطابقة لـ registry.json. شغّل npm run registry:build والتزم الناتج."
+            git --no-pager diff --stat -- public/r
+            exit 1
+          fi
+
+      - name: استنتاج رقم الإصدار وتوليد سجلّ التغييرات
+        id: decide
+        run: node .github/scripts/release.mjs >> "$GITHUB_OUTPUT"
+
+      - name: لا يوجد ما يستحق إصداراً
+        if: steps.decide.outputs.release != 'true'
+        run: echo "لا التزام يستحق إصداراً منذ آخر وسم. لا شيء يُنشر."
+
+      - name: التزام سجلّ التغييرات
+        if: steps.decide.outputs.release == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore(release): ${{ steps.decide.outputs.tag }}"
+          git push origin HEAD:main
+
+      - name: إنشاء الوسم ودفعه
+        if: steps.decide.outputs.release == 'true'
+        run: |
+          git tag -a "${{ steps.decide.outputs.tag }}" -m "${{ steps.decide.outputs.tag }}"
+          git push origin "${{ steps.decide.outputs.tag }}"
+
+      - name: نشر الإصدار على GitHub
+        if: steps.decide.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.decide.outputs.tag }}" \
+            --title "${{ steps.decide.outputs.tag }}" \
+            --notes-file release-notes.md
