@@ -219,6 +219,25 @@ await reportAccessChange(env, createConfig(env), {
 
 ---
 
+## الاستقرار والتوافق
+
+`v1.0.0` هو أول عقد ثابت للحزمة. ما يلي سطحها العام، ولا يتغيّر إلا برقم إصدار رئيسي جديد:
+
+| السطح | ما يشمله |
+|---|---|
+| الإعداد | `createConfig(env, overrides)` وحقول `AuthConfig` |
+| الوسيط | `authenticate` و `pagesMiddleware` و `honoMiddleware` و `isPublicPath` |
+| الاستقبال | `handleCallback` و `pagesCallback` و `onClaims` و `reportAccessChange` |
+| التحقق | `verifyToken` |
+| الأعضاء | `getMember` و `upsertMember` و `touchMember` ومخطّط الأعمدة |
+| التنقية | `safeNext` وتوابع الكوكيز والمعرّفات |
+| المتغيّرات | أسماء `PLATFORM_ID` و `AUTH_ISSUER` و `MEMBERS_*` و `DEFAULT_ROLE` |
+| رموز الرفض | `inactive` و `not_member` و `bad_state` و `auth_failed` |
+
+**والوسم عقد.** متى استهلكت منصة واحدة إصداراً، جُمّد محتواه: أي تغيير بعده يستلزم رقماً جديداً. وإعادة وسم إصدار مستهلَك تعطي منصتين محتوى مختلفاً تحت اسم واحد — وهو أسوأ أنواع الفشل لأنه صامت.
+
+---
+
 ## الاختبارات
 
 ```bash
