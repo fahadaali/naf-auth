@@ -87,7 +87,7 @@ AUTH_ISSUER = "https://id.naf.sa"
 
 **وما يتغيّر بين منصة وأخرى هو `wrangler.toml` وحده.**
 
-والمتغيّرات الاختيارية لا تُكتب إلا إذا خالف مخطّط منصتك الافتراضي:
+والمتغيّرات الاختيارية لا تُكتب إلا إذا خالف مخطّط منصتك الافتراضي. والعمودان الاختياريان يُعطَّلان بالقيمة `-` — لا بقيمة فارغة، فالفراغ في TOML يُقرأ غياباً لا نفياً:
 
 | المتغيّر | الافتراضي | متى يُضبط |
 |---|---|---|
@@ -97,10 +97,10 @@ AUTH_ISSUER = "https://id.naf.sa"
 | `MEMBERS_NAME_COLUMN` | `display_name` | |
 | `MEMBERS_EMAIL_COLUMN` | `email` | |
 | `MEMBERS_ROLE_COLUMN` | `role` | |
-| `MEMBERS_PERMS_COLUMN` | `perms` | يُترك فارغاً إن لم يوجد العمود |
+| `MEMBERS_PERMS_COLUMN` | `perms` | `-` إن لم يوجد العمود |
 | `MEMBERS_ACTIVE_COLUMN` | `is_active` | |
 | `MEMBERS_CREATED_COLUMN` | `created_at` | |
-| `MEMBERS_LAST_SEEN_COLUMN` | `last_seen_at` | يُترك فارغاً إن لم يوجد العمود |
+| `MEMBERS_LAST_SEEN_COLUMN` | `last_seen_at` | `-` إن لم يوجد العمود |
 | `MEMBERS_TIME_FORMAT` | `epoch` | `iso` إذا كانت أوقات المنصة نصّية |
 | `AUTH_DB_BINDING` | `DB` | ارتباط `D1` باسم آخر |
 | `AUTH_KV_BINDING` | `AUTH_KV` | ارتباط `KV` باسم آخر |

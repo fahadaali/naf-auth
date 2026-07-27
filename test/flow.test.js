@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createConfig } from '../src/index.js';
 import { authenticate, isPublicPath } from '../src/middleware.js';
 import { handleCallback } from '../src/callback.js';
-import { upsertMember } from '../src/store.js';
+import { getMember, upsertMember } from '../src/store.js';
 
 function fakeKV() {
   const store = new Map();
@@ -206,4 +206,33 @@ test('اسم جدول أو عمود غير سليم يوقف الاستعلام 
   const { env, config } = setup();
   config.schema.table = 'users; DROP TABLE users';
   await assert.rejects(() => upsertMember(env, config, { sub: 'u1' }));
+});
+
+test('عمود اختياري يُعطَّل بالقيمة - فلا يدخل الاستعلام', async () => {
+  const kv = fakeKV();
+  const db = fakeDB(null);
+  const env = {
+    AUTH_ISSUER: 'https://id.naf.example',
+    PLATFORM_ID: 'naf-test',
+    AUTH_KV: kv,
+    DB: db,
+    MEMBERS_TABLE: 'users',
+    MEMBERS_ID_COLUMN: 'id',
+    MEMBERS_ROLE_COLUMN: 'role_name',
+    MEMBERS_PERMS_COLUMN: '-',
+    MEMBERS_LAST_SEEN_COLUMN: '-',
+  };
+  const config = createConfig(env);
+  assert.equal(config.schema.perms, null);
+  assert.equal(config.schema.lastSeenAt, null);
+
+  await upsertMember(env, config, { sub: 'u1', name: 'فهد', email: 'f@example.com' });
+  const insert = db.statements.find((s) => s.includes('INSERT INTO'));
+  assert.doesNotMatch(insert, /perms/);
+  assert.doesNotMatch(insert, /last_seen_at/);
+
+  // والقراءة أيضاً لا تطلب عموداً غير موجود.
+  await getMember(env, config, 'u1');
+  const select = db.statements.find((s) => s.includes('SELECT'));
+  assert.doesNotMatch(select, /perms/);
 });

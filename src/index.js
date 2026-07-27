@@ -52,6 +52,12 @@ const DEFAULT_REASONS = {
   authFailed: 'auth_failed',
 };
 
+/** `-` تعني: هذا العمود غير موجود في جدول هذه المنصة. */
+function optionalColumn(value) {
+  const trimmed = String(value).trim();
+  return trimmed === '-' || trimmed === '' ? null : trimmed;
+}
+
 function required(value, name) {
   if (!value || typeof value !== 'string') {
     throw new Error(`naf-auth: ${name} مطلوب ولا يُخمَّن`);
@@ -69,15 +75,18 @@ export function createConfig(env, overrides = {}) {
   const schema = { ...DEFAULT_SCHEMA, ...(overrides.schema || {}) };
 
   // مخطّط جدول قائم يُضبط من `wrangler.toml` دون تعديل كود المنصة.
+  // والعمودان الاختياريان يُعطَّلان بالقيمة `-`: جدول أعضاء قائم قد لا يحوي
+  // عمود صلاحيات دقيقة ولا عمود آخر ظهور، والقيمة الفارغة في TOML لا تكفي
+  // لإلغاء الافتراضي لأنها تُقرأ كغياب لا كنفي.
   if (env.MEMBERS_TABLE) schema.table = env.MEMBERS_TABLE;
   if (env.MEMBERS_ID_COLUMN) schema.id = env.MEMBERS_ID_COLUMN;
   if (env.MEMBERS_NAME_COLUMN) schema.name = env.MEMBERS_NAME_COLUMN;
   if (env.MEMBERS_EMAIL_COLUMN) schema.email = env.MEMBERS_EMAIL_COLUMN;
   if (env.MEMBERS_ROLE_COLUMN) schema.role = env.MEMBERS_ROLE_COLUMN;
-  if (env.MEMBERS_PERMS_COLUMN) schema.perms = env.MEMBERS_PERMS_COLUMN;
   if (env.MEMBERS_ACTIVE_COLUMN) schema.isActive = env.MEMBERS_ACTIVE_COLUMN;
   if (env.MEMBERS_CREATED_COLUMN) schema.createdAt = env.MEMBERS_CREATED_COLUMN;
-  if (env.MEMBERS_LAST_SEEN_COLUMN) schema.lastSeenAt = env.MEMBERS_LAST_SEEN_COLUMN;
+  if (env.MEMBERS_PERMS_COLUMN) schema.perms = optionalColumn(env.MEMBERS_PERMS_COLUMN);
+  if (env.MEMBERS_LAST_SEEN_COLUMN) schema.lastSeenAt = optionalColumn(env.MEMBERS_LAST_SEEN_COLUMN);
 
   const kvBinding = overrides.kvBinding || env.AUTH_KV_BINDING || 'AUTH_KV';
 
