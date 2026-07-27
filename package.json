@@ -1,0 +1,29 @@
+{
+  "name": "naf-auth",
+  "version": "0.0.0",
+  "private": false,
+  "description": "جسر المصادقة بين منصات ناف وخدمة الهوية المركزية naf-id",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./middleware": "./src/middleware.js",
+    "./callback": "./src/callback.js",
+    "./verify": "./src/verify.js",
+    "./store": "./src/store.js",
+    "./safe": "./src/safe.js"
+  },
+  "files": [
+    "src",
+    "migrations",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
