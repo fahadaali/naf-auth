@@ -74,6 +74,10 @@ export async function handleCallback(request, env, config) {
     const token = await exchangeCode(code, env, config);
     claims = await verifyToken(token, env, config);
 
+    // نقطة تعليق بين التحقق والإدراج. منصة لها نظام أعضاء قائم تطابق هنا
+    // العضو القادم بسجلّه المحلي قبل أن يُنشأ سجلّ ثانٍ له بالخطأ.
+    if (config.onClaims) await config.onClaims(claims, env, config);
+
     // ٥ — أدرج العضو أو حدّثه.
     const member = await upsertMember(env, config, claims);
 

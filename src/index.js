@@ -120,6 +120,8 @@ export function createConfig(env, overrides = {}) {
     reasons: { ...DEFAULT_REASONS, ...(overrides.reasons || {}) },
 
     onError: overrides.onError || null,
+    // يُستدعى بعد التحقق وقبل الإدراج — لمطابقة عضو قائم أو ترحيله.
+    onClaims: overrides.onClaims || null,
   };
 }
 

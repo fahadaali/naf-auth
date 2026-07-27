@@ -6,7 +6,10 @@
   "type": "module",
   "main": "./src/index.js",
   "exports": {
-    ".": "./src/index.js",
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
     "./middleware": "./src/middleware.js",
     "./callback": "./src/callback.js",
     "./verify": "./src/verify.js",
@@ -25,5 +28,6 @@
   "engines": {
     "node": ">=18"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "types": "./src/index.d.ts"
 }
