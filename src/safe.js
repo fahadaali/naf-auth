@@ -105,6 +105,17 @@ export function assertIdentifier(value, label) {
   return value;
 }
 
+/**
+ * توحيد صورة المُصدِر بحذف الشرطة المائلة الأخيرة.
+ *
+ * `iss` يُطابَق حرفياً، و`https://id.example/` و `https://id.example` صورتان
+ * لنطاق واحد. فلو كُتب في `wrangler.toml` بصورة وأصدر المركز بالأخرى
+ * لرُفض كل رمز بـ `bad_issuer` — والسبب محارف لا منطق. تُوحَّد الصورتان هنا.
+ */
+export function normaliseIssuer(issuer) {
+  return typeof issuer === 'string' ? issuer.replace(/\/+$/, '') : issuer;
+}
+
 /** فكّ ترميز base64url إلى بايتات. */
 export function base64UrlToBytes(input) {
   const normalised = input.replace(/-/g, '+').replace(/_/g, '/');

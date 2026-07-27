@@ -37,7 +37,7 @@ export async function startLogin(request, env, config) {
     expirationTtl: config.stateTtlSeconds,
   });
 
-  const target = new URL(`${config.issuer.replace(/\/+$/, '')}/go/${config.platformId}`);
+  const target = new URL(`${config.issuer}/go/${config.platformId}`);
   target.searchParams.set('next', next);
   target.searchParams.set('state', state);
 

@@ -1,7 +1,7 @@
 // naf-auth — التحقق من الرمز الموقّع
 // عبر WebCrypto مباشرة، وبلا أي اتصال بقاعدة المركز.
 
-import { AuthError, base64UrlToBytes, base64UrlToText } from './safe.js';
+import { AuthError, base64UrlToBytes, base64UrlToText, normaliseIssuer } from './safe.js';
 
 /** كاش المفاتيح العامة: ساعة واحدة (§٥). */
 const JWKS_TTL_SECONDS = 3600;
@@ -13,7 +13,7 @@ const CLOCK_SKEW_SECONDS = 60;
 const ALG = 'RS256';
 
 function jwksUrl(issuer) {
-  return `${issuer.replace(/\/+$/, '')}/.well-known/jwks.json`;
+  return `${normaliseIssuer(issuer)}/.well-known/jwks.json`;
 }
 
 /**
@@ -111,7 +111,9 @@ export async function verifyToken(token, env, config) {
   const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, signingInput);
   if (!valid) throw new AuthError('bad_signature');
 
-  if (payload.iss !== config.issuer) throw new AuthError('bad_issuer');
+  if (normaliseIssuer(payload.iss) !== normaliseIssuer(config.issuer)) {
+    throw new AuthError('bad_issuer');
+  }
   if (!audienceMatches(payload.aud, config.platformId)) throw new AuthError('bad_audience');
 
   const now = Math.floor(Date.now() / 1000);

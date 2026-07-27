@@ -215,3 +215,39 @@ test('رمز بلا sub يُرفض', async () => {
     restore();
   }
 });
+
+test('شرطة مائلة أخيرة في AUTH_ISSUER لا ترفض الرمز', async () => {
+  const k = await makeKey('k1');
+  const { config, restore } = setup({ current: [k.jwk] });
+  try {
+    // كما يُكتب في wrangler.toml بشرطة أخيرة، والمركز يصدر بلا شرطة.
+    const withSlash = { ...config, issuer: `${ISSUER}/` };
+    const token = await sign(k.pair.privateKey, { alg: 'RS256', kid: 'k1' }, claims());
+    assert.equal((await verifyToken(token, {}, withSlash)).sub, 'u1');
+
+    // والعكس: الإعداد بلا شرطة والرمز بها.
+    const issuedWithSlash = await sign(
+      k.pair.privateKey,
+      { alg: 'RS256', kid: 'k1' },
+      claims({ iss: `${ISSUER}/` }),
+    );
+    assert.equal((await verifyToken(issuedWithSlash, {}, config)).sub, 'u1');
+  } finally {
+    restore();
+  }
+});
+
+test('مُصدِر مختلف فعلاً لا يزال يُرفض رغم التوحيد', async () => {
+  const k = await makeKey('k1');
+  const { config, restore } = setup({ current: [k.jwk] });
+  try {
+    const token = await sign(
+      k.pair.privateKey,
+      { alg: 'RS256', kid: 'k1' },
+      claims({ iss: `${ISSUER}.evil.sa` }),
+    );
+    await assert.rejects(() => verifyToken(token, {}, config), (e) => e.code === 'bad_issuer');
+  } finally {
+    restore();
+  }
+});

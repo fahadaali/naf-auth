@@ -14,7 +14,7 @@ async function exchangeCode(code, env, config) {
   const secret = env[config.secretBinding];
   if (!secret) throw new AuthError('secret_missing');
 
-  const res = await fetch(`${config.issuer.replace(/\/+$/, '')}/api/token`, {
+  const res = await fetch(`${config.issuer}/api/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({
@@ -120,7 +120,7 @@ export async function reportAccessChange(env, config, { userId, status, reason }
   const secret = env[config.secretBinding];
   if (!secret) throw new AuthError('secret_missing');
 
-  const res = await fetch(`${config.issuer.replace(/\/+$/, '')}/api/internal/access`, {
+  const res = await fetch(`${config.issuer}/api/internal/access`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({

@@ -2,6 +2,7 @@
 // حزمة الجسر بين منصات ناف وخدمة الهوية المركزية `naf-id`.
 
 import { DEFAULT_SCHEMA } from './store.js';
+import { normaliseIssuer } from './safe.js';
 
 export { authenticate, honoMiddleware, isPublicPath, pagesMiddleware, startLogin, deniedResponse } from './middleware.js';
 export { handleCallback, pagesCallback, reportAccessChange } from './callback.js';
@@ -12,6 +13,7 @@ export {
   clearCookie,
   newSessionId,
   newState,
+  normaliseIssuer,
   randomToken,
   readCookie,
   safeNext,
@@ -80,7 +82,7 @@ export function createConfig(env, overrides = {}) {
   const kvBinding = overrides.kvBinding || env.AUTH_KV_BINDING || 'AUTH_KV';
 
   return {
-    issuer: required(overrides.issuer || env.AUTH_ISSUER, 'AUTH_ISSUER'),
+    issuer: normaliseIssuer(required(overrides.issuer || env.AUTH_ISSUER, 'AUTH_ISSUER')),
     platformId: required(overrides.platformId || env.PLATFORM_ID, 'PLATFORM_ID'),
 
     // الأسماء وحدها هنا، لا القيم: السرّ يُقرأ من `env` عند الحاجة إليه.
