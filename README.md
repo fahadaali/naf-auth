@@ -22,11 +22,15 @@
 
 ```json
 "dependencies": {
-  "naf-auth": "github:fahadaali/naf-auth#v1.0.0"
+  "naf-auth": "github:fahadaali/naf-auth#v3.0.0"
 }
 ```
 
 **ثبّت على وسم إصدار لا على `main`** — وإلا تغيّر سلوك المنصات الخمس فجأة عند أي تعديل في الحزمة.
+
+**ولا تثبّت على `v1.0.0`.** أسماء حقوله تخالف ما يقرؤه المركز، وكان يولّد
+حالةً عابرة لا يعيدها المركز — فكل دخول يفشل بـ`bad_state` قبل أن تقع
+المبادلة أصلاً. انظر «الاستقرار والتوافق».
 
 ### ٢ — أنشئ مساحة `KV` واربطها
 
@@ -189,11 +193,15 @@ createConfig(env, {
 import { createConfig, reportAccessChange } from 'naf-auth';
 
 await reportAccessChange(env, createConfig(env), {
-  userId: member.user_id,
-  status: 'revoked',
+  email: member.email,
+  state: 'revoked',
   reason: 'أُوقف من إعدادات المنصة',
 });
 ```
+
+**والعضو يُعرَّف بالبريد لا بمعرّفه المركزي:** جدول الوصول في المركز
+يُطابَق بالبريد. و`state` قيمتها `granted` أو `revoked` حصراً — وما عداهما
+يردّ عليه المركز `invalid_state`.
 
 ---
 
