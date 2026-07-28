@@ -3,8 +3,14 @@
 
 import { AuthError, base64UrlToBytes, base64UrlToText, normaliseIssuer } from './safe.js';
 
-/** كاش المفاتيح العامة: ساعة واحدة (§٥). */
-const JWKS_TTL_SECONDS = 3600;
+/**
+ * كاش المفاتيح العامة: خمس دقائق — وهي المدّة التي يقرّرها المركز في عقده.
+ *
+ * وهي سقفُ ما يتأخّره التدوير: المركز ينشر المفتاح التالي، ثم ينتظر أن
+ * تكون كل منصة قد قرأت `JWKS` قبل أن ينقله ليوقّع. فمنصةٌ تخبّئ ساعةً
+ * تُخلّ بهذا الانتظار وترفض الرموز الجديدة حتى ينقضي كاشها.
+ */
+const JWKS_TTL_SECONDS = 300;
 
 /** فارق الساعة المسموح: ٦٠ ثانية (الاحتراز الرابع في §١٠). */
 const CLOCK_SKEW_SECONDS = 60;
@@ -78,11 +84,15 @@ function decodeJwt(token) {
   };
 }
 
-/** `aud` قد يأتي نصاً أو مصفوفة — كلاهما مقبول بشرط أن يحوي معرّف المنصة. */
+/**
+ * `aud` مقارنةٌ حرفية بمعرّف المنصة — نصّاً لا مصفوفة.
+ *
+ * المركز يوقّع `aud` نصّاً واحداً دائماً، فقبول المصفوفة توسيعٌ لا يقابله
+ * شيء في العقد. والمعرّف حسّاس لحالة الأحرف ولا يُطبَّع: منصةٌ تخفض
+ * `NAF-Accountant` إلى حروف صغيرة ترفض كل رمز صحيح، ورفضاً صامتاً.
+ */
 function audienceMatches(aud, platformId) {
-  if (typeof aud === 'string') return aud === platformId;
-  if (Array.isArray(aud)) return aud.includes(platformId);
-  return false;
+  return typeof aud === 'string' && aud === platformId;
 }
 
 /**
@@ -111,9 +121,9 @@ export async function verifyToken(token, env, config) {
   const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, signingInput);
   if (!valid) throw new AuthError('bad_signature');
 
-  if (normaliseIssuer(payload.iss) !== normaliseIssuer(config.issuer)) {
-    throw new AuthError('bad_issuer');
-  }
+  // مقارنةٌ حرفية. و`config.issuer` وُحّدت صورتُه مرة واحدة عند بناء
+  // الإعداد، فما يُقارَن هنا هو `iss` كما وقّعه المركز بلا تطبيع.
+  if (payload.iss !== config.issuer) throw new AuthError('bad_issuer');
   if (!audienceMatches(payload.aud, config.platformId)) throw new AuthError('bad_audience');
 
   const now = Math.floor(Date.now() / 1000);

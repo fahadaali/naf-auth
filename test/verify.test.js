@@ -218,20 +218,35 @@ test('رمز بلا sub يُرفض', async () => {
 
 test('شرطة مائلة أخيرة في AUTH_ISSUER لا ترفض الرمز', async () => {
   const k = await makeKey('k1');
+  const { restore } = setup({ current: [k.jwk] });
+  try {
+    // `createConfig` يوحّد صورة المُصدِر مرة واحدة، فما يصل إلى المقارنة
+    // موحَّد أصلاً — وهذا يعالج شرطةً كُتبت في wrangler.toml سهواً.
+    const { createConfig } = await import('../src/index.js');
+    const config = createConfig({
+      AUTH_ISSUER: `${ISSUER}/`,
+      PLATFORM_ID: PLATFORM,
+      AUTH_KV: {},
+      kv: () => {},
+    }, { kv: () => setup({ current: [k.jwk] }).kv });
+    assert.equal(config.issuer, ISSUER, 'الشرطة تُحذف عند بناء الإعداد');
+  } finally {
+    restore();
+  }
+});
+
+test('المقارنة بعد التوحيد حرفية: iss بشرطة أخيرة من المركز يُرفض', async () => {
+  const k = await makeKey('k1');
   const { config, restore } = setup({ current: [k.jwk] });
   try {
-    // كما يُكتب في wrangler.toml بشرطة أخيرة، والمركز يصدر بلا شرطة.
-    const withSlash = { ...config, issuer: `${ISSUER}/` };
-    const token = await sign(k.pair.privateKey, { alg: 'RS256', kid: 'k1' }, claims());
-    assert.equal((await verifyToken(token, {}, withSlash)).sub, 'u1');
-
-    // والعكس: الإعداد بلا شرطة والرمز بها.
-    const issuedWithSlash = await sign(
+    // المُصدِر قيمةٌ موقّعة من المركز، وسير النشر هناك يفشل إن خالفت
+    // النطاق الفعلي. فقبول صورةٍ أخرى منها توسيعٌ لا يقابله شيء في العقد.
+    const token = await sign(
       k.pair.privateKey,
       { alg: 'RS256', kid: 'k1' },
       claims({ iss: `${ISSUER}/` }),
     );
-    assert.equal((await verifyToken(issuedWithSlash, {}, config)).sub, 'u1');
+    await assert.rejects(() => verifyToken(token, {}, config), (e) => e.code === 'bad_issuer');
   } finally {
     restore();
   }

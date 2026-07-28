@@ -1,16 +1,38 @@
 // naf-auth — مسار الاستقبال
 // يستقبل رمز العبور، يبادله خادماً لخادم، ينشئ العضو، ثم يفتح جلسة المنصة.
 
-import { AuthError, newSessionId, safeNext, sessionCookie, timingSafeEqual } from './safe.js';
+import { AuthError, newSessionId, safeNext, sessionCookie } from './safe.js';
 import { deniedResponse, startLogin } from './middleware.js';
 import { upsertMember } from './store.js';
 import { verifyToken } from './verify.js';
 
 /**
- * مبادلة رمز العبور بالرمز الموقّع — خادماً لخادم (الخطوة ٣ في §٦-٢).
- * السرّ لا يغادر هذه الدالة، ولا يدخل رسالة خطأ ولا سجلّاً (الاحتراز الثالث في §١٠).
+ * عمر الجلسة = ما بقي من عمر الرمز.
+ *
+ * الرمز يعيش خمس عشرة دقيقة، وقِصَره هو ما يجعل الإيقاف المركزي يسري خلال
+ * ربع ساعة. فجلسةٌ أطول منه تُبطل هذه الخاصية بالضبط: يبقى الموقوف مركزياً
+ * داخلاً حتى ينتهي كوكيه لا حتى ينتهي رمزه.
+ *
+ * و`KV` لا يقبل عمراً أقلّ من ستين ثانية.
  */
-async function exchangeCode(code, env, config) {
+function sessionTtl(exp) {
+  return Math.max(60, exp - Math.floor(Date.now() / 1000));
+}
+
+/**
+ * مبادلة رمز العبور بالرمز الموقّع — خادماً لخادم.
+ *
+ * أسماء الحقول هي أسماء المركز حرفياً: `platformId` و `secret` و `code`
+ * و `state`. والمركز يفحص أنواعها الأربعة نصوصاً ويردّ `invalid_body` على
+ * أي اختلاف — فاسم حقل واحد بصيغة أخرى يُسقط كل دخول في المنصة، ويفشل
+ * فشلاً لا يفرّق بينه وبين سرّ خاطئ.
+ *
+ * والسرّ لا يغادر هذه الدالة، ولا يدخل رسالة خطأ ولا سجلّاً.
+ *
+ * `state` يُعاد كما وصل من المركز لا كما ولّدناه: المركز هو من يولّده
+ * ويخزّنه مع الرمز، ويطابق الاثنين عند المبادلة.
+ */
+async function exchangeCode(code, state, env, config) {
   const secret = env[config.secretBinding];
   if (!secret) throw new AuthError('secret_missing');
 
@@ -18,9 +40,10 @@ async function exchangeCode(code, env, config) {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({
+      platformId: config.platformId,
+      secret,
       code,
-      client_id: config.platformId,
-      client_secret: secret,
+      state,
     }),
   });
 
@@ -30,13 +53,25 @@ async function exchangeCode(code, env, config) {
   }
 
   const body = await res.json().catch(() => null);
-  const token = body && (body.token || body.id_token || body.access_token);
-  if (!token) throw new AuthError('exchange_malformed');
-  return token;
+  if (!body || typeof body.token !== 'string' || !body.token) {
+    throw new AuthError('exchange_malformed');
+  }
+
+  // الوجهة تعود في ردّ المبادلة. وتُنقّى هنا مرة أخرى: أن المركز فحصها لا
+  // يُغني عن فحصنا، فنحن من يضعها في ترويسة `Location`.
+  return { token: body.token, next: safeNext(body.next) };
 }
 
 /**
- * مسار الاستقبال بالترتيب المنصوص في §٦-٢.
+ * مسار الاستقبال.
+ *
+ * لا حالة عابرة محلية: المركز يولّد `state` ويخزّنه مع رمز العبور، ثم
+ * يطابق الاثنين عند المبادلة ويرفض عند الاختلاف. فحالةٌ ثانية من طرفنا
+ * لا يعرفها المركز ولا يعيدها لا تضيف تحقّقاً — تُسقط الدخول وحسب.
+ *
+ * ورمز العبور يُستهلك مرة واحدة خلال ستين ثانية، فلا إعادة محاولة به:
+ * محاولةٌ ثانية بالرمز نفسه تفشل حتماً.
+ *
  * يعيد `Response` دائماً.
  */
 export async function handleCallback(request, env, config) {
@@ -44,69 +79,56 @@ export async function handleCallback(request, env, config) {
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
 
-  // ١ — بلا رمز: أعد التحويل إلى المركز.
+  // بلا رمز: أعد التحويل إلى المركز — زائرٌ بلغ المسار مباشرةً لا عائدٌ منه.
   if (!code) return startLogin(request, env, config);
 
-  // ٢ — طابق الحالة مع المخزَّن واحذفه. بلا مطابقة يُرفض الطلب.
+  // بلا حالة لا مبادلة: المركز يرسلهما معاً، وغيابها يعني رابطاً مركّباً.
   if (!state) return deniedResponse(config, config.reasons.badState);
 
-  const kv = config.kv(env);
-  const storedRaw = await kv.get(`st:${state}`);
-  if (!storedRaw) return deniedResponse(config, config.reasons.badState);
-  await kv.delete(`st:${state}`);
-
-  let stored;
   try {
-    stored = JSON.parse(storedRaw);
-  } catch {
-    return deniedResponse(config, config.reasons.badState);
-  }
+    const { token, next: exchangedNext } = await exchangeCode(code, state, env, config);
 
-  // المفتاح نفسه هو الحالة، فوجوده مطابقة. والمقارنة الصريحة تبقى
-  // احتياطاً لو غُيّر التخزين لاحقاً ليحمل الحالة داخل القيمة.
-  if (stored.state && !timingSafeEqual(stored.state, state)) {
-    return deniedResponse(config, config.reasons.badState);
-  }
-
-  let claims;
-  try {
-    // ٣ — المبادلة، ٤ — التحقق الكامل: التوقيع و iss و aud و exp معاً.
-    const token = await exchangeCode(code, env, config);
-    claims = await verifyToken(token, env, config);
+    // التحقق الكامل: التوقيع و `iss` و `aud` و `exp` معاً.
+    const claims = await verifyToken(token, env, config);
 
     // نقطة تعليق بين التحقق والإدراج. منصة لها نظام أعضاء قائم تطابق هنا
     // العضو القادم بسجلّه المحلي قبل أن يُنشأ سجلّ ثانٍ له بالخطأ.
     if (config.onClaims) await config.onClaims(claims, env, config);
 
-    // ٥ — أدرج العضو أو حدّثه.
     const member = await upsertMember(env, config, claims);
 
-    // ٦ — الموقوف يُحوَّل إلى الرفض ولا تُفتح له جلسة.
+    // الموقوف محلياً يُحوَّل إلى الرفض ولا تُفتح له جلسة.
     if (!member || !member.isActive) {
       return deniedResponse(config, config.reasons.inactive);
     }
 
-    // ٧ — جلسة بمعرّف عشوائي، فيها `sub` والرمز الموقّع.
+    // جلسة بمعرّف عشوائي، تحمل الرمز الموقّع نفسه: الوسيط يعيد التحقق منه
+    // في كل طلب محمي، فلا تكون الجلسة أطول عمراً من الرمز الذي أنشأها.
+    const ttl = sessionTtl(claims.exp);
     const sid = newSessionId();
-    await kv.put(
+    await config.kv(env).put(
       `sess:${sid}`,
-      JSON.stringify({ sub: claims.sub, token, createdAt: Math.floor(Date.now() / 1000) }),
-      { expirationTtl: config.sessionTtlSeconds },
+      JSON.stringify({ sub: claims.sub, token, exp: claims.exp }),
+      { expirationTtl: ttl },
     );
 
-    // ٨ — التحويل إلى الوجهة بعد تنقيتها، مع كوكي الجلسة.
-    const next = safeNext(stored.next);
+    // الوجهة تصل في الرابط وتعود في ردّ المبادلة. ما في الرابط أولى لأنه
+    // ما طلبه هذا المتصفّح، وردّ المبادلة احتياطُه.
+    const fromUrl = safeNext(url.searchParams.get('next'));
+    const next = fromUrl === '/' ? exchangedNext : fromUrl;
+
     return new Response(null, {
       status: 302,
       headers: {
         location: next,
-        'set-cookie': sessionCookie(config.cookieName, sid, config.sessionTtlSeconds),
+        'set-cookie': sessionCookie(config.cookieName, sid, ttl),
+        'cache-control': 'no-store',
       },
     });
   } catch (err) {
     const errorCode = err instanceof AuthError ? err.code : 'callback_failed';
     if (config.onError) config.onError(errorCode, err);
-    // الرسالة للمستخدم رمز ثابت، لا تفصيل تقني (الاحتراز الثامن في §١٠).
+    // الرسالة للمستخدم رمز ثابت، لا تفصيل تقني.
     return deniedResponse(config, config.reasons.authFailed);
   }
 }
@@ -117,23 +139,35 @@ export function pagesCallback(config) {
 }
 
 /**
- * التبليغ العكسي (§٦-٤): عند إيقاف عضو من إعدادات المنصة يُبلَّغ المركز
- * ليظهر السبب للمستخدم في شبكته.
+ * التبليغ العكسي: عند إيقاف عضو من إعدادات المنصة يُبلَّغ المركز ليوافق
+ * جدولُ الوصول ما تراه المنصة — وإلا بقيت بطاقتها تدعو المستخدم إلى باب
+ * لا يفتح.
+ *
+ * والعضو يُعرَّف بالبريد لا بالمعرّف المركزي: المركز يطابق صفّه بالبريد.
+ *
+ * والمنصة تبلّغ عن نفسها لا عن غيرها — المركز يشتقّ المنصة من سرّها.
  */
-export async function reportAccessChange(env, config, { userId, status, reason }) {
+export async function reportAccessChange(env, config, { email, state, reason }) {
   const secret = env[config.secretBinding];
   if (!secret) throw new AuthError('secret_missing');
+
+  // الحالتان المقبولتان مركزياً. وأي غيرهما يردّ المركز عليه `invalid_state`،
+  // فيُمنع هنا قبل أن يحمل السرّ في طلب مرفوض.
+  if (state !== 'granted' && state !== 'revoked') throw new AuthError('bad_access_state');
+  if (typeof email !== 'string' || !email.trim()) throw new AuthError('missing_email');
+
+  const body = {
+    platformId: config.platformId,
+    secret,
+    email: email.trim(),
+    state,
+  };
+  if (typeof reason === 'string' && reason.trim()) body.reason = reason.trim();
 
   const res = await fetch(`${config.issuer}/api/internal/access`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({
-      client_id: config.platformId,
-      client_secret: secret,
-      user_id: userId,
-      status,
-      reason,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) throw new AuthError('access_report_failed', `تعذّر تبليغ المركز (${res.status})`);
