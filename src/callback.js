@@ -79,8 +79,28 @@ export async function handleCallback(request, env, config) {
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
 
-  // بلا رمز: أعد التحويل إلى المركز — زائرٌ بلغ المسار مباشرةً لا عائدٌ منه.
-  if (!code) return startLogin(request, env, config);
+  /* بلا رمز: أعد التحويل إلى المركز — زائرٌ بلغ المسار مباشرةً لا عائدٌ منه.
+
+     والوجهة الجذر لا هذا المسار، وإلا دارت دورةٌ لا تنتهي:
+
+       ١) زائرٌ يبلغ `‎/auth/callback` بلا رمز
+       ٢) فيُحوَّل إلى `‎{issuer}/go/:id?next=/auth/callback`
+       ٣) فيصدر المركز رمزاً ويعيده إلى `platform.url` — وهي هذا المسار
+          نفسه — ومعه `next=/auth/callback`
+       ٤) فتتمّ المبادلة وتُفتح الجلسة، ثم يُحوَّل إلى `next` أي إلى
+          `‎/auth/callback` بلا رمز
+       ٥) فيعود إلى (١)
+
+     والمتصفّح يقطعها بـ`ERR_TOO_MANY_REDIRECTS` — لا برسالة تقول ما جرى.
+     ويقع فعلاً: رابطٌ محفوظ في المفضّلة، أو عودةٌ بزرّ الرجوع بعد دخول تمّ.
+
+     ومسار الاستقبال ليس وجهةً في أي حال: هو محطّة لا صفحة. */
+  if (!code) {
+    const root = new URL(request.url);
+    root.pathname = '/';
+    root.search = '';
+    return startLogin(new Request(root, request), env, config);
+  }
 
   // بلا حالة لا مبادلة: المركز يرسلهما معاً، وغيابها يعني رابطاً مركّباً.
   if (!state) return deniedResponse(request, config, config.reasons.badState);
@@ -115,7 +135,13 @@ export async function handleCallback(request, env, config) {
     // الوجهة تصل في الرابط وتعود في ردّ المبادلة. ما في الرابط أولى لأنه
     // ما طلبه هذا المتصفّح، وردّ المبادلة احتياطُه.
     const fromUrl = safeNext(url.searchParams.get('next'));
-    const next = fromUrl === '/' ? exchangedNext : fromUrl;
+    const resolved = fromUrl === '/' ? exchangedNext : fromUrl;
+
+    /* ووجهةٌ تشير إلى مسار الاستقبال تُردّ إلى الجذر.
+       هو محطّة لا صفحة: بلوغه بلا رمز يبدأ الدخول من أوّله، فالعودة إليه
+       بعد دخولٍ تمّ تعيد الكرّة بلا نهاية. والفحص هنا لا عند التوليد وحده
+       لأن القيمة تعود من المركز كذلك. */
+    const next = resolved === url.pathname ? '/' : resolved;
 
     return new Response(null, {
       status: 302,
@@ -147,22 +173,37 @@ export function pagesCallback(config) {
  *
  * والمنصة تبلّغ عن نفسها لا عن غيرها — المركز يشتقّ المنصة من سرّها.
  */
-export async function reportAccessChange(env, config, { email, state, reason }) {
+export async function reportAccessChange(env, config, { email, state, reason, role }) {
   const secret = env[config.secretBinding];
   if (!secret) throw new AuthError('secret_missing');
 
+  if (typeof email !== 'string' || !email.trim()) throw new AuthError('missing_email');
+
+  const hasState = state !== undefined && state !== null;
+  const hasRole = typeof role === 'string' && role.trim();
+
   // الحالتان المقبولتان مركزياً. وأي غيرهما يردّ المركز عليه `invalid_state`،
   // فيُمنع هنا قبل أن يحمل السرّ في طلب مرفوض.
-  if (state !== 'granted' && state !== 'revoked') throw new AuthError('bad_access_state');
-  if (typeof email !== 'string' || !email.trim()) throw new AuthError('missing_email');
+  if (hasState && state !== 'granted' && state !== 'revoked') {
+    throw new AuthError('bad_access_state');
+  }
+  // تبليغٌ لا يحمل حالةً ولا صلاحية لا يقول شيئاً — ويُمنع قبل أن يحمل السرّ.
+  if (!hasState && !hasRole) throw new AuthError('empty_access_report');
 
   const body = {
     platformId: config.platformId,
     secret,
     email: email.trim(),
-    state,
   };
+  if (hasState) body.state = state;
   if (typeof reason === 'string' && reason.trim()) body.reason = reason.trim();
+
+  /* الصلاحية داخل المنصة تُبلَّغ للعرض وحده.
+     المصادقة مركزية والصلاحيات موزّعة، فالمركز لا يقرّر ما يملكه العضو هنا
+     ولا يستطيع. لكنه كان يمنح وصولاً ولا يرى أثره: مسؤول النظام يمنح، ثم
+     لا تقول له أي شاشة ماذا صار يرى الممنوح. فتُرسل المنصة ما قرّرته لتعرضه
+     لوحة المركز — قراءةً لا حكماً، ولا يُقرأ في أي قرار دخول. */
+  if (hasRole) body.role = role.trim();
 
   const res = await fetch(`${config.issuer}/api/internal/access`, {
     method: 'POST',

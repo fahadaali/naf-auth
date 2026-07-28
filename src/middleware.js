@@ -79,12 +79,25 @@ export function deniedResponse(request, config, reason) {
   return redirect(path);
 }
 
-/** عنوان باب المركز لهذه المنصة، ومعه الوجهة المطلوبة. */
+/**
+ * عنوان باب المركز لهذه المنصة، ومعه الوجهة المطلوبة.
+ *
+ * والوجهة تُعلَّق للتنقّل وحده. مسارُ نداءٍ برمجي لا يصلح وجهةَ عودة: من
+ * ردّت لوحتُه على `‎/api/me` بـ٤٠١ ثم دخل بهذا الرابط يعود إلى `‎/api/me`
+ * فيقرأ `JSON` خاماً مكان لوحته. والمسار الذي ردّ ليس الصفحةَ التي يقف
+ * فيها صاحبه أصلاً — المتصفّح وحده يعرفها، فيعلّقها هو على `login` العائد
+ * في الجسم.
+ *
+ * وهذا يقع في كل منصة: الرمز يعيش خمس عشرة دقيقة، ولوحةٌ مفتوحة أطول من
+ * ذلك تبلغ هذا الردّ. وقد عولج في أربع لوحات على حدة قبل أن يُعالج هنا.
+ */
 function loginUrl(request, config) {
   const url = new URL(request.url);
-  const target = new URL(`${config.issuer}/go/${config.platformId}`);
-  const next = safeNext(url.pathname + url.search);
-  if (next !== '/') target.searchParams.set('next', next);
+  const target = new URL(`${config.issuer}/go/${encodeURIComponent(config.platformId)}`);
+  if (wantsDocument(request, url, config)) {
+    const next = safeNext(url.pathname + url.search);
+    if (next !== '/') target.searchParams.set('next', next);
+  }
   return target.toString();
 }
 

@@ -140,14 +140,23 @@ import { createConfig, pagesCallback } from 'naf-auth';
 export const onRequest = (context) => pagesCallback(createConfig(context.env))(context);
 ```
 
+`functions/auth/logout.js`:
+
+```js
+import { createConfig, pagesLogout } from 'naf-auth';
+
+export const onRequest = (context) => pagesLogout(createConfig(context.env))(context);
+```
+
 ثم تقرأ الصفحات المستخدم من `context.data.user`.
 
 #### Worker على Hono
 
 ```js
-import { createConfig, handleCallback, honoMiddleware } from 'naf-auth';
+import { createConfig, handleCallback, handleLogout, honoMiddleware } from 'naf-auth';
 
 app.get('/auth/callback', (c) => handleCallback(c.req.raw, c.env, createConfig(c.env)));
+app.post('/auth/logout', (c) => handleLogout(c.req.raw, c.env, createConfig(c.env)));
 app.use('*', (c, next) => honoMiddleware(createConfig(c.env))(c, next));
 ```
 
@@ -185,6 +194,41 @@ createConfig(env, {
 
 ---
 
+## الخروج
+
+```js
+import { createConfig, handleLogout } from 'naf-auth';
+
+app.post('/auth/logout', (c) => handleLogout(c.req.raw, c.env, createConfig(c.env)));
+```
+
+**الخروج محليّ، ووجهته المركز.** والجملتان معاً لا إحداهما — وفي إغفال الثانية كان العطل.
+
+`handleLogout` يحذف `sess:{sid}` من `KV` ثم يمسح الكوكي. والحذف هو الخروج فعلاً: الكوكي الممسوح يبقى صالحاً عند من نسخ قيمته قبل الخروج، والمفتاح المحذوف لا يبقى.
+
+ثم يُخرج المتصفّح إلى `‎{issuer}/` — **لا إلى `‎/`**. وهذا هو موضع العطل الذي عالجه هذا الإصدار: جذر المنصة محميّ، فيحوّله الوسيط إلى `‎/go/:id`، وجلسة المركز لم تُمسّ فتُصدر رمزاً جديداً، فيعود المستخدم إلى الشاشة التي خرج منها قبل أن يقرأ شيئاً. فيقرأ من ذلك أن الزرّ لا يعمل — وهو يعمل، والوجهة كانت داخل السياج.
+
+وشكل الردّ يتبع طبيعة الطلب كما في الوسيط:
+
+| الطلب | الردّ |
+|---|---|
+| تنقّل يعرض صفحة | `302` إلى `‎{issuer}/` |
+| نداء برمجي (`fetch`) | `200` + `{ ok: true, next }` |
+
+والفرع الثاني لازم: المتصفّح لا يتبع تحويلةً إلى أصل آخر في نداء `fetch` بلا `CORS` — يسقط الطلب بخطأ شبكة فتبقى اللوحة مكانها وقد أُغلقت جلستها تحتها. فتنتقل اللوحة إلى `next` بنفسها:
+
+```js
+const res = await fetch('/auth/logout', { method: 'POST' });
+const { next } = await res.json();
+window.location.href = next;
+```
+
+**ومسار الخروج يُكتب في `publicPaths` أو يُسجَّل قبل الوسيط.** من انتهت جلسته يجب أن يخرج كذلك، وحمايةُ المسار تحوّله إلى المركز ليدخل قبل أن يُسمح له بالخروج.
+
+**ولا تُبطَل جلسة المركز من هنا.** إنهاؤها من منصة يُخرج المستخدم من المنصات الأخرى وهو لم يطلب ذلك. ومن أراد الخروج من المركز نفسه يفعله من المركز.
+
+---
+
 ## التبليغ العكسي
 
 عند إيقاف عضو من إعدادات المنصة، أبلغ المركز ليظهر السبب للمستخدم في شبكته:
@@ -202,6 +246,21 @@ await reportAccessChange(env, createConfig(env), {
 **والعضو يُعرَّف بالبريد لا بمعرّفه المركزي:** جدول الوصول في المركز
 يُطابَق بالبريد. و`state` قيمتها `granted` أو `revoked` حصراً — وما عداهما
 يردّ عليه المركز `invalid_state`.
+
+### الصلاحية في التبليغ — للعرض وحده
+
+`role` حقل اختياري يُرسل مع الحالة أو وحده:
+
+```js
+await reportAccessChange(env, createConfig(env), {
+  email: member.email,
+  role: 'admin', // أو مع state في التبليغ نفسه
+});
+```
+
+**المصادقة مركزية والصلاحيات موزّعة، وهذا لا يغيّره.** المركز يقرّر الدخول من عدمه ولا يقرّر ما يملكه الداخل، ولا يُقرأ `role` في أي قرار دخول — لا في `‎/go/:id` ولا في `‎/api/token`. وإنما كان مسؤول النظام يمنح وصولاً ولا تقول له أي شاشة ماذا صار يرى الممنوح، فصارت المنصة تبلّغ بما قرّرته لتعرضه لوحة المركز.
+
+وتبليغٌ بلا `state` ولا `role` يُمنع محلياً بـ`empty_access_report` قبل أن يحمل السرّ في طلب لا يقول شيئاً.
 
 ---
 

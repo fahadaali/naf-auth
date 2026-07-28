@@ -12,6 +12,7 @@
     },
     "./middleware": "./src/middleware.js",
     "./callback": "./src/callback.js",
+    "./logout": "./src/logout.js",
     "./verify": "./src/verify.js",
     "./store": "./src/store.js",
     "./safe": "./src/safe.js"
