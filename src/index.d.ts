@@ -84,8 +84,20 @@ export function pagesCallback(config: AuthConfig): (context: any) => Promise<Res
 export function reportAccessChange(
   env: any,
   config: AuthConfig,
-  change: { email: string; state: 'granted' | 'revoked'; reason?: string },
+  /** `state` أو `role` — أحدهما على الأقل. و`role` للعرض في لوحة المركز لا لقرار دخول. */
+  change: {
+    email: string;
+    state?: 'granted' | 'revoked';
+    reason?: string;
+    role?: string;
+  },
 ): Promise<boolean>;
+
+/** وجهة الخارج: شبكة المنصات في المركز — لا جذر هذه المنصة. */
+export function logoutTarget(config: AuthConfig): string;
+/** ينهي جلسة المنصة ويخرج المتصفّح إلى المركز: ٣٠٢ للتنقّل، و`{ ok, next }` لنداء `fetch`. */
+export function handleLogout(request: Request, env: any, config: AuthConfig): Promise<Response>;
+export function pagesLogout(config: AuthConfig): (context: any) => Promise<Response>;
 
 export function verifyToken(token: string, env: any, config: AuthConfig): Promise<Claims>;
 

@@ -147,22 +147,37 @@ export function pagesCallback(config) {
  *
  * والمنصة تبلّغ عن نفسها لا عن غيرها — المركز يشتقّ المنصة من سرّها.
  */
-export async function reportAccessChange(env, config, { email, state, reason }) {
+export async function reportAccessChange(env, config, { email, state, reason, role }) {
   const secret = env[config.secretBinding];
   if (!secret) throw new AuthError('secret_missing');
 
+  if (typeof email !== 'string' || !email.trim()) throw new AuthError('missing_email');
+
+  const hasState = state !== undefined && state !== null;
+  const hasRole = typeof role === 'string' && role.trim();
+
   // الحالتان المقبولتان مركزياً. وأي غيرهما يردّ المركز عليه `invalid_state`،
   // فيُمنع هنا قبل أن يحمل السرّ في طلب مرفوض.
-  if (state !== 'granted' && state !== 'revoked') throw new AuthError('bad_access_state');
-  if (typeof email !== 'string' || !email.trim()) throw new AuthError('missing_email');
+  if (hasState && state !== 'granted' && state !== 'revoked') {
+    throw new AuthError('bad_access_state');
+  }
+  // تبليغٌ لا يحمل حالةً ولا صلاحية لا يقول شيئاً — ويُمنع قبل أن يحمل السرّ.
+  if (!hasState && !hasRole) throw new AuthError('empty_access_report');
 
   const body = {
     platformId: config.platformId,
     secret,
     email: email.trim(),
-    state,
   };
+  if (hasState) body.state = state;
   if (typeof reason === 'string' && reason.trim()) body.reason = reason.trim();
+
+  /* الصلاحية داخل المنصة تُبلَّغ للعرض وحده.
+     المصادقة مركزية والصلاحيات موزّعة، فالمركز لا يقرّر ما يملكه العضو هنا
+     ولا يستطيع. لكنه كان يمنح وصولاً ولا يرى أثره: مسؤول النظام يمنح، ثم
+     لا تقول له أي شاشة ماذا صار يرى الممنوح. فتُرسل المنصة ما قرّرته لتعرضه
+     لوحة المركز — قراءةً لا حكماً، ولا يُقرأ في أي قرار دخول. */
+  if (hasRole) body.role = role.trim();
 
   const res = await fetch(`${config.issuer}/api/internal/access`, {
     method: 'POST',
