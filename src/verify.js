@@ -96,10 +96,27 @@ function audienceMatches(aud, platformId) {
 }
 
 /**
+ * نوع الرمز — الفرق الوحيد بين رمز الدخول ورمز إشعار الخروج الخلفي.
+ *
+ * كلاهما من المركز، بالمفتاح نفسه و`iss` نفسه و`aud` معرّفِ هذه المنصة،
+ * فكلاهما يجتاز التوقيع والمُصدِر والجمهور والمدّة. ولولا هذا التمييز لصلح
+ * إشعارُ الخروج — وهو يصل إلى مسار عامّ لا حراسة عليه — أن يُقدَّم كرمز
+ * جلسة. فيُشترط الغرض في الجهتين: مفقوداً في رمز الدخول، وموجوداً في الإشعار.
+ *
+ * واسمه `purpose` لا `typ`: ترويسة JOSE فيها `typ` أصلاً بقيمة `JWT`،
+ * فحقلٌ ثانٍ بالاسم نفسه في الحمولة يجعل قارئ الرمز يظنّ أحدهما الآخر.
+ */
+export const LOGOUT_PURPOSE = 'backchannel-logout';
+
+/**
  * التحقق الكامل (الاحتراز الرابع في §١٠): التوقيع و `iss` و `aud` و `exp` معاً.
  * رمز منصة أخرى يُرفض بـ `aud`، والمنتهي يُرفض بـ `exp`.
+ *
+ * و`expectedPurpose` يُفحص على الحمولة الموقَّعة نفسها — لا على نسخةٍ منها
+ * تُعاد صياغتها. الرمز يُتحقّق منه كما وصل حرفاً بحرف: التوقيع يغطّي نصَّ
+ * الحمولة، فأيّ إعادة ترميزٍ لها تُبطله.
  */
-export async function verifyToken(token, env, config) {
+async function verifySigned(token, env, config, expectedPurpose) {
   const { header, payload, signature, signingInput } = decodeJwt(token);
 
   // يُفحص قبل أي شيء: `none` و`HS256` بمفتاح عام هجومان معروفان على هذا الموضع.
@@ -138,7 +155,21 @@ export async function verifyToken(token, env, config) {
 
   if (!payload.sub || typeof payload.sub !== 'string') throw new AuthError('missing_sub');
 
+  // الغرض آخِرَ ما يُفحص لأنه أرخص ما يُفحص، ولا يُقبل ضمناً في الحالين:
+  // رمزُ جلسةٍ يُشترط ألّا يحمله، ورمزُ خروجٍ يُشترط أن يحمله.
+  if ((payload.purpose ?? null) !== expectedPurpose) throw new AuthError('wrong_token_type');
+
   return payload;
+}
+
+/** رمز الدخول — ولا يحمل غرضاً. */
+export function verifyToken(token, env, config) {
+  return verifySigned(token, env, config, null);
+}
+
+/** رمز إشعار الخروج الخلفي — ولا يصلح جلسةً. */
+export function verifyLogoutToken(token, env, config) {
+  return verifySigned(token, env, config, LOGOUT_PURPOSE);
 }
 
 export { JWKS_TTL_SECONDS, CLOCK_SKEW_SECONDS };

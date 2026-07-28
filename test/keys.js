@@ -44,5 +44,21 @@ export function fakeKV() {
     async delete(key) {
       store.delete(key);
     },
+    /* `list` بصفحاتٍ صغيرة عمداً.
+       KV الحقيقي يردّ صفحة محدودة ومعها مؤشّر، ومن قرأ الصفحة الأولى وحدها
+       ظنّ أنه استوفى. فالصفحة هنا مفتاحان اثنان ليمرّ كل فحصٍ لعضوٍ له أكثر
+       من جلستين بالمؤشّر فعلاً لا نظرياً. */
+    async list({ prefix = '', cursor, limit = 2 } = {}) {
+      const all = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+      const start = cursor ? Number(cursor) : 0;
+      const slice = all.slice(start, start + limit);
+      const end = start + slice.length;
+      const complete = end >= all.length;
+      return {
+        keys: slice.map((name) => ({ name })),
+        list_complete: complete,
+        cursor: complete ? undefined : String(end),
+      };
+    },
   };
 }

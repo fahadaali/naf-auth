@@ -99,6 +99,19 @@ export function logoutTarget(config: AuthConfig): string;
 export function handleLogout(request: Request, env: any, config: AuthConfig): Promise<Response>;
 export function pagesLogout(config: AuthConfig): (context: any) => Promise<Response>;
 
+/** إشعار الخروج الخلفي — المركز يُنهي جلسات عضوٍ في هذه المنصة. */
+export function handleBackchannelLogout(
+  request: Request,
+  env: any,
+  config: AuthConfig,
+): Promise<Response>;
+export function pagesBackchannelLogout(
+  config: AuthConfig,
+): (context: any) => Promise<Response>;
+
+export const LOGOUT_PURPOSE: string;
+export function verifyLogoutToken(token: string, env: any, config: AuthConfig): Promise<Claims>;
+
 export function verifyToken(token: string, env: any, config: AuthConfig): Promise<Claims>;
 
 export function getMember(env: any, config: AuthConfig, userId: string): Promise<Member | null>;

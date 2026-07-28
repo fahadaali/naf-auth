@@ -14,8 +14,20 @@ export {
   wantsDocument,
 } from './middleware.js';
 export { handleCallback, pagesCallback, reportAccessChange } from './callback.js';
-export { handleLogout, logoutTarget, pagesLogout } from './logout.js';
-export { verifyToken, CLOCK_SKEW_SECONDS, JWKS_TTL_SECONDS } from './verify.js';
+export {
+  handleLogout,
+  logoutTarget,
+  pagesLogout,
+  handleBackchannelLogout,
+  pagesBackchannelLogout,
+} from './logout.js';
+export {
+  verifyToken,
+  verifyLogoutToken,
+  LOGOUT_PURPOSE,
+  CLOCK_SKEW_SECONDS,
+  JWKS_TTL_SECONDS,
+} from './verify.js';
 export { getMember, touchMember, upsertMember, DEFAULT_SCHEMA } from './store.js';
 export {
   AuthError,

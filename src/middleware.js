@@ -170,6 +170,7 @@ export async function authenticate(request, env, config) {
     // رمزٌ لم يعد صالحاً: تُمسح الجلسة فلا تُقرأ ثانيةً، ويعود الطلب إلى
     // المركز ليصدر رمزاً جديداً إن كان صاحبه لا يزال مخوَّلاً.
     await kv.delete(`sess:${sid}`);
+    await kv.delete(`usr:${session.sub}:${sid}`);
     return { response: noSession() };
   }
 
