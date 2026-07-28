@@ -79,8 +79,28 @@ export async function handleCallback(request, env, config) {
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
 
-  // بلا رمز: أعد التحويل إلى المركز — زائرٌ بلغ المسار مباشرةً لا عائدٌ منه.
-  if (!code) return startLogin(request, env, config);
+  /* بلا رمز: أعد التحويل إلى المركز — زائرٌ بلغ المسار مباشرةً لا عائدٌ منه.
+
+     والوجهة الجذر لا هذا المسار، وإلا دارت دورةٌ لا تنتهي:
+
+       ١) زائرٌ يبلغ `‎/auth/callback` بلا رمز
+       ٢) فيُحوَّل إلى `‎{issuer}/go/:id?next=/auth/callback`
+       ٣) فيصدر المركز رمزاً ويعيده إلى `platform.url` — وهي هذا المسار
+          نفسه — ومعه `next=/auth/callback`
+       ٤) فتتمّ المبادلة وتُفتح الجلسة، ثم يُحوَّل إلى `next` أي إلى
+          `‎/auth/callback` بلا رمز
+       ٥) فيعود إلى (١)
+
+     والمتصفّح يقطعها بـ`ERR_TOO_MANY_REDIRECTS` — لا برسالة تقول ما جرى.
+     ويقع فعلاً: رابطٌ محفوظ في المفضّلة، أو عودةٌ بزرّ الرجوع بعد دخول تمّ.
+
+     ومسار الاستقبال ليس وجهةً في أي حال: هو محطّة لا صفحة. */
+  if (!code) {
+    const root = new URL(request.url);
+    root.pathname = '/';
+    root.search = '';
+    return startLogin(new Request(root, request), env, config);
+  }
 
   // بلا حالة لا مبادلة: المركز يرسلهما معاً، وغيابها يعني رابطاً مركّباً.
   if (!state) return deniedResponse(request, config, config.reasons.badState);
@@ -115,7 +135,13 @@ export async function handleCallback(request, env, config) {
     // الوجهة تصل في الرابط وتعود في ردّ المبادلة. ما في الرابط أولى لأنه
     // ما طلبه هذا المتصفّح، وردّ المبادلة احتياطُه.
     const fromUrl = safeNext(url.searchParams.get('next'));
-    const next = fromUrl === '/' ? exchangedNext : fromUrl;
+    const resolved = fromUrl === '/' ? exchangedNext : fromUrl;
+
+    /* ووجهةٌ تشير إلى مسار الاستقبال تُردّ إلى الجذر.
+       هو محطّة لا صفحة: بلوغه بلا رمز يبدأ الدخول من أوّله، فالعودة إليه
+       بعد دخولٍ تمّ تعيد الكرّة بلا نهاية. والفحص هنا لا عند التوليد وحده
+       لأن القيمة تعود من المركز كذلك. */
+    const next = resolved === url.pathname ? '/' : resolved;
 
     return new Response(null, {
       status: 302,

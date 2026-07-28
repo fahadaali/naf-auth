@@ -195,3 +195,24 @@ test('حالة غير مقبولة تُمنع قبل أن يحمل السرّ', 
     assert.equal(calls.length, 0);
   });
 });
+
+// ─────────── مسار الاستقبال ليس وجهةً ───────────
+
+test('بلوغ مسار الاستقبال بلا رمز يبدأ الدخول بوجهة الجذر لا بنفسه', async () => {
+  const { env, config } = setup();
+  const { handleCallback } = await import('../src/callback.js');
+
+  const response = await handleCallback(
+    reqWith('/auth/callback', { mode: 'navigate' }),
+    env,
+    config,
+  );
+
+  assert.equal(response.status, 302);
+  const target = new URL(response.headers.get('location'));
+  assert.equal(target.pathname, `/go/${PLATFORM}`);
+  /* لو حملت `next=/auth/callback` لدارت دورة لا تنتهي: المركز يعيد الرمز
+     إلى هذا المسار، فتتمّ المبادلة، ثم يُحوَّل إلى `next` أي إليه بلا رمز،
+     فيبدأ الدخول من أوّله. والمتصفّح يقطعها بـERR_TOO_MANY_REDIRECTS. */
+  assert.equal(target.searchParams.has('next'), false);
+});
