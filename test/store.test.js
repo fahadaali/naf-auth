@@ -187,6 +187,23 @@ test('دخولٌ ثانٍ متزامن لا يُسقط الاستقبال — ا
   assert.equal(member.role, 'admin');
 });
 
+test('مطالبةٌ بلا اسم لا تمحو الاسم القائم ولا تُسقط الدخول', async () => {
+  const db = new DatabaseSync(':memory:');
+  marketingSchema(db);
+  const { env, config } = marketingConfig(db);
+
+  db.prepare(
+    `INSERT INTO users (id, name, email, password_hash, role_name, is_active)
+     VALUES (?, ?, ?, '', 'writer', 1)`,
+  ).run('sub-1', 'فهد', 'f@naflaw.sa');
+
+  // رمزٌ بلا `name`: لو كُتب NULL لسقط على `name TEXT NOT NULL`.
+  const member = await upsertMember(env, config, { sub: 'sub-1', email: 'f@naflaw.sa' });
+
+  assert.equal(member.role, 'writer');
+  assert.equal(db.prepare('SELECT name FROM users WHERE id = ?').get('sub-1').name, 'فهد');
+});
+
 test('getMember يعيد null لمن لا صفّ له', async () => {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE TABLE members (

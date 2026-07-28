@@ -115,22 +115,37 @@ export async function upsertMember(env, config, claims) {
 
   if (existing) {
     /* الأعمدة المملوكة وحدها: الاسم والبريد وآخر ظهور. ولا الدور ولا حالة
-       التفعيل — وإلا أُعيد كل مستخدم إلى الافتراضي وفُكّ إيقاف الموقوف. */
-    const sets = [`${c.name} = ?`, `${c.email} = ?`];
-    const values = [claims.name ?? null, claims.email ?? null];
+       التفعيل — وإلا أُعيد كل مستخدم إلى الافتراضي وفُكّ إيقاف الموقوف.
 
+       والمملوكُ منها لا يُكتب إلا إن جاء في الرمز: اسمٌ غائب يُكتب NULL
+       فوق اسمٍ قائم يمحوه بلا فائدة، ويسقط الطلبَ كلَّه إن كان العمود
+       `NOT NULL` في جدول منصةٍ قائمة. */
+    const sets = [];
+    const values = [];
+
+    if (claims.name != null) {
+      sets.push(`${c.name} = ?`);
+      values.push(claims.name);
+    }
+    if (claims.email != null) {
+      sets.push(`${c.email} = ?`);
+      values.push(claims.email);
+    }
     if (c.lastSeenAt) {
       sets.push(`${c.lastSeenAt} = ?`);
       values.push(now);
     }
-    values.push(claims.sub);
 
-    await db
-      .prepare(`UPDATE ${c.table} SET ${sets.join(', ')} WHERE ${c.id} = ?`)
-      .bind(...values)
-      .run();
+    if (sets.length) {
+      values.push(claims.sub);
+      await db
+        .prepare(`UPDATE ${c.table} SET ${sets.join(', ')} WHERE ${c.id} = ?`)
+        .bind(...values)
+        .run();
+      return getMember(env, config, claims.sub);
+    }
 
-    return getMember(env, config, claims.sub);
+    return existing;
   }
 
   const cols = [c.id, c.name, c.email, c.role, c.isActive, c.createdAt];
