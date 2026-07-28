@@ -23,14 +23,46 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
  *
  * ملاحظة مقصودة: منع النقطتين الرأسيتين يشمل سلسلة الاستعلام، فمسار مثل
  * `/posts?q=a:b` يعود إلى الجذر. هذا نصّ الوثيقة، والأمان فيه مقدَّم على الراحة.
+ *
+ * ولا يكفي فحص النصّ كما وصل. القيمة تمرّ بالمركز ثم تعود إلينا، وقد نفكّ
+ * ترميزها مرة أخرى قبل استعمالها — فـ`/%2f%2fevil.sa` يمرّ فحصاً ساذجاً ثم
+ * يصير `//evil.sa` عندنا، وهي الثغرة نفسها بخطوة إضافية. لذلك يُفكّ الترميز
+ * حتى يستقرّ، ويُفحص الشكلان: كما وصل، وكما سيؤول.
+ *
+ * وأن المركز فحصه لا يُغني: هذا الطرف يقرّر لنفسه.
  */
+function looksSafe(value) {
+  if (value[0] !== '/') return false;
+  if (value[1] === '/') return false;
+  if (value.includes(':')) return false;
+  if (value.includes('\\')) return false;
+  if (CONTROL_CHARS.test(value)) return false;
+  return true;
+}
+
+/** يفكّ الترميز حتى يستقرّ. وتداخل أعمق من أربع طبقات لا سبب مشروع له. */
+function decodeFully(value) {
+  let current = value;
+  for (let round = 0; round < 4; round += 1) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      return null;
+    }
+    if (decoded === current) return current;
+    current = decoded;
+  }
+  return null;
+}
+
 export function safeNext(next) {
   if (typeof next !== 'string' || next.length === 0) return '/';
-  if (next[0] !== '/') return '/';
-  if (next[1] === '/') return '/';
-  if (next.includes(':')) return '/';
-  if (next.includes('\\')) return '/';
-  if (CONTROL_CHARS.test(next)) return '/';
+  if (!looksSafe(next)) return '/';
+
+  const settled = decodeFully(next);
+  if (settled === null || !looksSafe(settled)) return '/';
+
   return next;
 }
 
@@ -49,10 +81,10 @@ export function newSessionId() {
   return randomToken(32);
 }
 
-/** الحالة العابرة قبل التحويل (الاحتراز الثاني في §١٠). */
-export function newState() {
-  return randomToken(32);
-}
+/*
+ * لا مولّد حالة عابرة هنا: `state` يولّده المركز ويخزّنه مع رمز العبور،
+ * ويطابق الاثنين عند المبادلة. وهذا الطرف يعيده كما وصله.
+ */
 
 /**
  * كوكي الجلسة (الاحتراز السادس في §١٠):

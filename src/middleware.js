@@ -1,11 +1,12 @@
 // naf-auth — الوسيط
 // يحمي كل مسارات المنصة، ويحوّل غير المسجَّل إلى المركز، ويحقن المستخدم في السياق.
 
-import { newState, readCookie, safeNext, sessionCookie } from './safe.js';
+import { AuthError, readCookie, safeNext } from './safe.js';
 import { getMember } from './store.js';
+import { verifyToken } from './verify.js';
 
 /**
- * أي مسار جديد محمي افتراضياً (§٦-١).
+ * أي مسار جديد محمي افتراضياً.
  * فالمطابقة صريحة: مساواة تامة، أو بادئة مُعلنة في `publicPrefixes`.
  * لا أنماط عامة ولا اجتهاد على الامتداد — إضافة مسار عام قرار مكتوب.
  */
@@ -14,34 +15,64 @@ export function isPublicPath(pathname, config) {
   return config.publicPrefixes.some((prefix) => pathname.startsWith(prefix));
 }
 
+/** مسار واجهة برمجية: يُردّ عليه برمز حالة لا بتحويلة. */
+function isApiPath(pathname, config) {
+  return config.apiPrefixes.some((prefix) => pathname.startsWith(prefix));
+}
+
 function redirect(location, headers = {}) {
-  return new Response(null, { status: 302, headers: { location, ...headers } });
+  return new Response(null, {
+    status: 302,
+    headers: { location, 'cache-control': 'no-store', ...headers },
+  });
 }
 
 /** تحويل إلى صفحة الرفض برمز سبب أو بنصّ قادم من المركز. */
 export function deniedResponse(config, reason) {
-  const url = `${config.deniedPath}?r=${encodeURIComponent(reason)}`;
-  return redirect(url);
+  return redirect(`${config.deniedPath}?r=${encodeURIComponent(reason)}`);
+}
+
+/** عنوان باب المركز لهذه المنصة، ومعه الوجهة المطلوبة. */
+function loginUrl(request, config) {
+  const url = new URL(request.url);
+  const target = new URL(`${config.issuer}/go/${config.platformId}`);
+  const next = safeNext(url.pathname + url.search);
+  if (next !== '/') target.searchParams.set('next', next);
+  return target.toString();
 }
 
 /**
- * بدء الدخول: تُولَّد الحالة وتُخزَّن مع الوجهة قبل التحويل (الاحتراز الثاني في §١٠).
- * الوجهة تُحفظ في `KV` لا في الرابط وحده، فما يُطابَق عند العودة هو المخزَّن.
+ * بدء الدخول: تحويلة إلى باب المركز.
+ *
+ * ولا حالة عابرة تُولَّد هنا: `‎/go/:id` يتجاهل أي `state` يصله ويولّد
+ * واحدة من عنده، فحالةٌ من طرفنا لا تعود إلينا أبداً — ومطابقتها عند
+ * الاستقبال تفشل حتماً فتُسقط كل دخول.
+ *
+ * والوجهة تُحمل في الرابط: المركز يعلّقها على مسار الاستقبال عند التحويل،
+ * ويعيدها ثانيةً في ردّ المبادلة.
  */
 export async function startLogin(request, env, config) {
-  const url = new URL(request.url);
-  const state = newState();
-  const next = safeNext(url.pathname + url.search);
+  return redirect(loginUrl(request, config));
+}
 
-  await config.kv(env).put(`st:${state}`, JSON.stringify({ next }), {
-    expirationTtl: config.stateTtlSeconds,
-  });
-
-  const target = new URL(`${config.issuer}/go/${config.platformId}`);
-  target.searchParams.set('next', next);
-  target.searchParams.set('state', state);
-
-  return redirect(target.toString());
+/**
+ * ردّ «لا جلسة» على طلب واجهة برمجية.
+ *
+ * تحويلةٌ إلى المركز لا تنفع طلب `fetch`: المتصفّح يتبعها إلى أصل آخر بلا
+ * ترويسات `CORS`، فيفشل الطلب فشلاً شبكياً لا يقول للوحة أن تعيد الدخول.
+ * والرمز ٤٠١ ومعه عنوان الباب يقولان ذلك صراحةً.
+ *
+ * وهذا يقع كثيراً لا نادراً: الرمز يعيش خمس عشرة دقيقة، ولوحةٌ مفتوحة
+ * أطول من ذلك تبلغ هذا الردّ في كل مرة.
+ */
+function unauthorizedResponse(request, config) {
+  return new Response(
+    JSON.stringify({ ok: false, error: 'unauthorized', login: loginUrl(request, config) }),
+    {
+      status: 401,
+      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+    },
+  );
 }
 
 /**
@@ -53,15 +84,38 @@ export async function authenticate(request, env, config) {
 
   if (isPublicPath(url.pathname, config)) return { public: true };
 
+  const noSession = () =>
+    isApiPath(url.pathname, config)
+      ? unauthorizedResponse(request, config)
+      : redirect(loginUrl(request, config));
+
   const sid = readCookie(request, config.cookieName);
-  if (!sid) return { response: await startLogin(request, env, config) };
+  if (!sid) return { response: noSession() };
 
-  const session = await config.kv(env).get(`sess:${sid}`, 'json');
+  const kv = config.kv(env);
+  const session = await kv.get(`sess:${sid}`, 'json');
 
-  // §٦-٣: الجلسة المنتهية تعود إلى المركز ولا تجدّد نفسها،
-  // وإلا بقي الموقوف مركزياً يدخل حتى انتهاء كوكيه.
-  if (!session || !session.sub) {
-    return { response: await startLogin(request, env, config) };
+  // الجلسة المنتهية تعود إلى المركز ولا تجدّد نفسها، وإلا بقي الموقوف
+  // مركزياً يدخل حتى انتهاء كوكيه.
+  if (!session || !session.sub || !session.token) return { response: noSession() };
+
+  /* ═══ التحقق في كل طلب محمي، لا عند الاستقبال وحده ═══
+     الرمز يعيش خمس عشرة دقيقة، وهذا الفحص هو ما يجعل لقِصَره معنى: بلا
+     إعادة تحقّق تصير الجلسة المحلية هي الحقيقة، فيبقى من أُوقف مركزياً
+     داخلاً ما بقي كوكيه. والتجديد يمرّ بالمركز لا هنا.
+
+     ولا شبكة في المسار السويّ: المفاتيح مخبّأة في `KV`، فالكلفة قراءةُ
+     مفتاح وتحقّقُ توقيع. */
+  try {
+    await verifyToken(session.token, env, config);
+  } catch (err) {
+    if (config.onError) {
+      config.onError(err instanceof AuthError ? err.code : 'session_verify_failed', err);
+    }
+    // رمزٌ لم يعد صالحاً: تُمسح الجلسة فلا تُقرأ ثانيةً، ويعود الطلب إلى
+    // المركز ليصدر رمزاً جديداً إن كان صاحبه لا يزال مخوَّلاً.
+    await kv.delete(`sess:${sid}`);
+    return { response: noSession() };
   }
 
   const member = await getMember(env, config, session.sub);
@@ -93,5 +147,3 @@ export function honoMiddleware(config) {
     await next();
   };
 }
-
-export { sessionCookie };

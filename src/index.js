@@ -12,7 +12,6 @@ export {
   AuthError,
   clearCookie,
   newSessionId,
-  newState,
   normaliseIssuer,
   randomToken,
   readCookie,
@@ -21,20 +20,20 @@ export {
   timingSafeEqual,
 } from './safe.js';
 
-/** جلسة المنصة: ١٢ ساعة (§٥). */
-const SESSION_TTL_SECONDS = 12 * 60 * 60;
-
-/** الحالة العابرة قبل التحويل: ٥ دقائق (§٥). */
-const STATE_TTL_SECONDS = 5 * 60;
-
 /**
- * المسارات العامة المكتوبة صراحةً (§٦-١): مسار الاستقبال، وصفحة الرفض،
- * وفحص الصحة. وأي مسار جديد خارج هذه القائمة محمي افتراضياً.
+ * المسارات العامة المكتوبة صراحةً: مسار الاستقبال، وصفحة الرفض، وفحص
+ * الصحة. وأي مسار جديد خارج هذه القائمة محمي افتراضياً.
  */
 const DEFAULT_PUBLIC_PATHS = ['/auth/callback', '/denied', '/health'];
 
 /** الأصول الساكنة — بادئات مُعلنة لا اجتهاد على الامتداد. */
 const DEFAULT_PUBLIC_PREFIXES = ['/assets/'];
+
+/**
+ * مسارات الواجهة البرمجية: يُردّ عليها ٤٠١ ومعه عنوان الباب، لا تحويلة.
+ * لوحةٌ تستدعي `fetch` لا تستطيع اتّباع تحويلة إلى أصل آخر.
+ */
+const DEFAULT_API_PREFIXES = ['/api/'];
 
 /**
  * رموز أسباب الرفض.
@@ -111,12 +110,15 @@ export function createConfig(env, overrides = {}) {
     timeFormat: overrides.timeFormat || env.MEMBERS_TIME_FORMAT || 'epoch',
 
     cookieName: overrides.cookieName || env.AUTH_COOKIE_NAME || 'naf_sid',
-    sessionTtlSeconds: overrides.sessionTtlSeconds || SESSION_TTL_SECONDS,
-    stateTtlSeconds: overrides.stateTtlSeconds || STATE_TTL_SECONDS,
+
+    // ولا `sessionTtlSeconds` هنا: عمر الجلسة ليس خياراً تضبطه المنصة،
+    // وإنما ما بقي من عمر الرمز الذي أنشأها. وأي عمر أطول يُبطل سريان
+    // الإيقاف المركزي خلال ربع ساعة.
 
     deniedPath: overrides.deniedPath || '/denied',
     publicPaths: overrides.publicPaths || DEFAULT_PUBLIC_PATHS,
     publicPrefixes: overrides.publicPrefixes || DEFAULT_PUBLIC_PREFIXES,
+    apiPrefixes: overrides.apiPrefixes || DEFAULT_API_PREFIXES,
     reasons: { ...DEFAULT_REASONS, ...(overrides.reasons || {}) },
 
     onError: overrides.onError || null,
@@ -126,9 +128,8 @@ export function createConfig(env, overrides = {}) {
 }
 
 export {
+  DEFAULT_API_PREFIXES,
   DEFAULT_PUBLIC_PATHS,
   DEFAULT_PUBLIC_PREFIXES,
   DEFAULT_REASONS,
-  SESSION_TTL_SECONDS,
-  STATE_TTL_SECONDS,
 };

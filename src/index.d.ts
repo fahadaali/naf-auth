@@ -14,14 +14,15 @@ export interface MemberSchema {
   createdAt: string;
 }
 
+/** محتوى الرمز بعد التحقق. الأربعة الأولى مضمونة — `verifyToken` يرفض بدونها. */
 export interface Claims {
   sub: string;
+  iss: string;
+  aud: string;
+  exp: number;
   name?: string;
   email?: string;
-  iss?: string;
-  aud?: string | string[];
   iat?: number;
-  exp?: number;
   [key: string]: unknown;
 }
 
@@ -43,11 +44,10 @@ export interface AuthConfig {
   defaultRole: string;
   timeFormat: 'epoch' | 'iso';
   cookieName: string;
-  sessionTtlSeconds: number;
-  stateTtlSeconds: number;
   deniedPath: string;
   publicPaths: string[];
   publicPrefixes: string[];
+  apiPrefixes: string[];
   reasons: Record<string, string>;
   onError: ((code: string, error: unknown) => void) | null;
   onClaims: ((claims: Claims, env: any, config: AuthConfig) => unknown) | null;
@@ -63,7 +63,7 @@ export function createConfig(env: any, overrides?: AuthConfigOverrides): AuthCon
 export interface AuthResult {
   response?: Response;
   user?: { id: string; role: string; perms: Record<string, unknown> | null };
-  session?: { sub: string; token: string; createdAt: number };
+  session?: { sub: string; token: string; exp: number };
   public?: boolean;
 }
 
@@ -79,7 +79,7 @@ export function pagesCallback(config: AuthConfig): (context: any) => Promise<Res
 export function reportAccessChange(
   env: any,
   config: AuthConfig,
-  change: { userId: string; status: string; reason?: string },
+  change: { email: string; state: 'granted' | 'revoked'; reason?: string },
 ): Promise<boolean>;
 
 export function verifyToken(token: string, env: any, config: AuthConfig): Promise<Claims>;
@@ -91,7 +91,6 @@ export function touchMember(env: any, config: AuthConfig, userId: string): Promi
 export function safeNext(next: unknown): string;
 export function randomToken(bytes?: number): string;
 export function newSessionId(): string;
-export function newState(): string;
 export function normaliseIssuer(issuer: string): string;
 export function sessionCookie(name: string, value: string, maxAgeSeconds: number): string;
 export function clearCookie(name: string): string;
@@ -104,10 +103,9 @@ export class AuthError extends Error {
 }
 
 export const DEFAULT_SCHEMA: MemberSchema;
+export const DEFAULT_API_PREFIXES: string[];
 export const DEFAULT_PUBLIC_PATHS: string[];
 export const DEFAULT_PUBLIC_PREFIXES: string[];
 export const DEFAULT_REASONS: Record<string, string>;
-export const SESSION_TTL_SECONDS: number;
-export const STATE_TTL_SECONDS: number;
 export const JWKS_TTL_SECONDS: number;
 export const CLOCK_SKEW_SECONDS: number;
