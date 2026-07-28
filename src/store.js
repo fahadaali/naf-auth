@@ -86,28 +86,70 @@ export async function getMember(env, config, userId) {
  * والدخول الثاني يحدّث الاسم والبريد وآخر ظهور — ولا يمسّ:
  *   - الدور: وإلا أُعيد كل مستخدم إلى الافتراضي عند كل دخول وضاعت الترقية
  *   - is_active: وإلا فُكّ إيقاف الموقوف بمجرّد محاولته الدخول
+ *
+ * ═══ يُقرأ أولاً ثم يُكتب — ولا `INSERT … ON CONFLICT` على صفٍّ قائم ═══
+ *
+ * كان واحداً: `INSERT` بكل الأعمدة و`ON CONFLICT(id) DO UPDATE`. وهو يسقط
+ * على **صفٍّ قائم** إن كان في الجدول عمودٌ `NOT NULL` بلا قيمة افتراضية
+ * لا تعرفه هذه الحزمة — لأن SQLite يفحص `NOT NULL` على الصفّ المقترَح
+ * **قبل** أن يكتشف تعارض التفرّد الذي يحوّله إلى `DO UPDATE`. فالجملة تُردّ
+ * ولا تصل إلى فرع التحديث أصلاً.
+ *
+ * وهذا ليس فرضاً نظرياً: `naf-marketing` تربط الحزمة بجدول `users` القائم،
+ * وفيه `password_hash TEXT NOT NULL` بلا افتراضي — عمودٌ لا تعرفه الحزمة
+ * ولا يجوز أن تعرفه. فكان كل دخول فيها يسقط بـ
+ * `NOT NULL constraint failed: users.password_hash`، ويصل صاحبَه «تعذّر
+ * التحقق من دخولك» بلا سبب ظاهر.
+ *
+ * فصار: إن وُجد الصفّ حُدِّثت أعمدتُه المملوكة وحدها ولا تُمسّ الأعمدة
+ * الأخرى؛ وإن لم يوجد أُدرج. والإدراج وحده يبقى مشروطاً بأن يحتمله الجدول —
+ * ومنصةٌ لجدولها أعمدة إلزامية تخصّها تُنشئ صفّها في `onClaims`، وهو موضعه
+ * المكتوب. عندئذ يجد `upsertMember` الصفّ ويحدّثه.
  */
 export async function upsertMember(env, config, claims) {
   const c = columns(config);
   const now = stamp(config.timeFormat);
+  const db = env[config.dbBinding];
+
+  const existing = await getMember(env, config, claims.sub);
+
+  if (existing) {
+    /* الأعمدة المملوكة وحدها: الاسم والبريد وآخر ظهور. ولا الدور ولا حالة
+       التفعيل — وإلا أُعيد كل مستخدم إلى الافتراضي وفُكّ إيقاف الموقوف. */
+    const sets = [`${c.name} = ?`, `${c.email} = ?`];
+    const values = [claims.name ?? null, claims.email ?? null];
+
+    if (c.lastSeenAt) {
+      sets.push(`${c.lastSeenAt} = ?`);
+      values.push(now);
+    }
+    values.push(claims.sub);
+
+    await db
+      .prepare(`UPDATE ${c.table} SET ${sets.join(', ')} WHERE ${c.id} = ?`)
+      .bind(...values)
+      .run();
+
+    return getMember(env, config, claims.sub);
+  }
 
   const cols = [c.id, c.name, c.email, c.role, c.isActive, c.createdAt];
   const values = [claims.sub, claims.name ?? null, claims.email ?? null, config.defaultRole, 1, now];
 
-  const updates = [`${c.name} = excluded.${c.name}`, `${c.email} = excluded.${c.email}`];
-
   if (c.lastSeenAt) {
     cols.push(c.lastSeenAt);
     values.push(now);
-    updates.push(`${c.lastSeenAt} = excluded.${c.lastSeenAt}`);
   }
 
   const placeholders = cols.map(() => '?').join(', ');
 
-  await env[config.dbBinding]
+  /* `DO NOTHING` لا `DO UPDATE`: دخولان متزامنان لعضوٍ جديد يبلغان هنا معاً،
+     فيُدرج أحدهما ويجد الآخر تعارضاً — وهو سباقٌ لا خطأ. والقراءة بعده
+     تعطي الصفّ الذي كُتب أياً كان كاتبه. */
+  await db
     .prepare(
       `INSERT INTO ${c.table} (${cols.join(', ')}) VALUES (${placeholders})
-       ON CONFLICT(${c.id}) DO UPDATE SET ${updates.join(', ')}`,
+       ON CONFLICT(${c.id}) DO NOTHING`,
     )
     .bind(...values)
     .run();

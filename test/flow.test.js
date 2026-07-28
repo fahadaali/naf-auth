@@ -419,15 +419,23 @@ test('التحديث لا يمسّ الدور ولا حالة التفعيل', a
   });
   await upsertMember(env, config, { sub: 'u1', name: 'فهد', email: 'f@example.com' });
 
-  const insert = db.statements.find((s) => s.includes('INSERT INTO'));
-  const update = insert.slice(insert.indexOf('DO UPDATE SET'));
+  const update = db.statements.find((s) => s.trimStart().startsWith('UPDATE'));
+  assert.ok(update, 'صفٌّ قائم يُحدَّث');
 
-  assert.match(update, /display_name = excluded\.display_name/);
-  assert.match(update, /email = excluded\.email/);
+  assert.match(update, /display_name = \?/);
+  assert.match(update, /email = \?/);
   // لو حُدّث الدور لعاد كل مستخدم إلى الافتراضي عند كل دخول،
   // ولو حُدّثت حالة التفعيل لفُكّ إيقاف الموقوف بمجرّد محاولته الدخول.
   assert.doesNotMatch(update, /\brole\b/);
   assert.doesNotMatch(update, /\bis_active\b/);
+
+  /* ولا `INSERT` على صفٍّ قائم.
+
+     كان `INSERT … ON CONFLICT DO UPDATE`، وهو يسقط على جدولٍ فيه عمود
+     `NOT NULL` بلا افتراضي لا تعرفه الحزمة: SQLite يفحص `NOT NULL` على
+     الصفّ المقترَح قبل أن يكتشف التعارض الذي يحوّله إلى التحديث. وهو ما
+     كان يُسقط كل دخول في `naf-marketing` — انظر `store.test.js`. */
+  assert.equal(db.statements.some((s) => s.includes('INSERT INTO')), false);
 });
 
 test('مخطّط جدول قائم يُضبط من البيئة وحدها', async () => {
