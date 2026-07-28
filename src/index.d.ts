@@ -63,6 +63,8 @@ export function createConfig(env: any, overrides?: AuthConfigOverrides): AuthCon
 export interface AuthResult {
   response?: Response;
   user?: { id: string; role: string; perms: Record<string, unknown> | null };
+  /** محتوى الرمز بعد التحقق منه في هذا الطلب — لا يُفكّ في المنصة بلا تحقّق. */
+  claims?: Claims;
   session?: { sub: string; token: string; exp: number };
   public?: boolean;
 }
@@ -70,7 +72,10 @@ export interface AuthResult {
 export function authenticate(request: Request, env: any, config: AuthConfig): Promise<AuthResult>;
 export function startLogin(request: Request, env: any, config: AuthConfig): Promise<Response>;
 export function isPublicPath(pathname: string, config: AuthConfig): boolean;
-export function deniedResponse(config: AuthConfig, reason: string): Response;
+export function deniedResponse(request: Request, config: AuthConfig, reason: string): Response;
+
+/** هل الطلب تنقّلٌ يعرض صفحة؟ `Sec-Fetch-Mode` ثم `Accept` ثم `apiPrefixes`. */
+export function wantsDocument(request: Request, url: URL, config: AuthConfig): boolean;
 export function pagesMiddleware(config: AuthConfig): (context: any) => Promise<Response>;
 export function honoMiddleware(config: AuthConfig): (c: any, next: () => Promise<void>) => Promise<Response | void>;
 

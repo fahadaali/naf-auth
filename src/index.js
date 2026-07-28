@@ -4,7 +4,15 @@
 import { DEFAULT_SCHEMA } from './store.js';
 import { normaliseIssuer } from './safe.js';
 
-export { authenticate, honoMiddleware, isPublicPath, pagesMiddleware, startLogin, deniedResponse } from './middleware.js';
+export {
+  authenticate,
+  deniedResponse,
+  honoMiddleware,
+  isPublicPath,
+  pagesMiddleware,
+  startLogin,
+  wantsDocument,
+} from './middleware.js';
 export { handleCallback, pagesCallback, reportAccessChange } from './callback.js';
 export { verifyToken, CLOCK_SKEW_SECONDS, JWKS_TTL_SECONDS } from './verify.js';
 export { getMember, touchMember, upsertMember, DEFAULT_SCHEMA } from './store.js';

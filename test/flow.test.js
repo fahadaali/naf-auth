@@ -108,6 +108,15 @@ function setup({ member = null, secret = 'sh-secret' } = {}) {
 const req = (path, cookie) =>
   new Request(`https://platform.example${path}`, cookie ? { headers: { cookie } } : undefined);
 
+/** طلب بترويسات: `mode` لـ`Sec-Fetch-Mode` و`accept` لترويسة القبول. */
+const reqWith = (path, { cookie, mode, accept } = {}) => {
+  const headers = {};
+  if (cookie) headers.cookie = cookie;
+  if (mode) headers['sec-fetch-mode'] = mode;
+  if (accept) headers.accept = accept;
+  return new Request(`https://platform.example${path}`, { headers });
+};
+
 // ───────────────────────────── الحارس ─────────────────────────────
 
 test('المسارات العامة مكتوبة صراحةً وما عداها محمي', () => {
@@ -478,4 +487,96 @@ test('عمود اختياري يُعطَّل بالقيمة - فلا يدخل ا
   await getMember(env, config, 'u1');
   const select = db.statements.find((s) => s.includes('SELECT'));
   assert.doesNotMatch(select, /perms/);
+});
+
+
+// ───────────── شكل الردّ يتبع طبيعة الطلب لا بادئة مساره ─────────────
+
+test('تنقّلٌ إلى مسار برمجي (رابط تنزيل) يُحوَّل ولا يأخذ JSON', async () => {
+  const { env, config } = setup();
+  const { response } = await authenticate(
+    reqWith('/api/reports/download?key=r/a.pdf', { mode: 'navigate' }),
+    env,
+    config,
+  );
+
+  // البادئة `‎/api/` تقول «برمجي»، وطبيعة الطلب تقول «تنقّل» — والثانية أولى:
+  // ردُّ JSON على رابطٍ يفتحه المستخدم يعرض عليه نصّاً خاماً.
+  assert.equal(response.status, 302);
+  assert.match(response.headers.get('location'), new RegExp(`^${ISSUER}/go/${PLATFORM}`));
+});
+
+test('نداء fetch إلى مسار خارج البادئات يأخذ ٤٠١ لا تحويلة', async () => {
+  const { env, config } = setup();
+  const { response } = await authenticate(reqWith('/posts', { mode: 'cors' }), env, config);
+
+  assert.equal(response.status, 401);
+  const body = await response.json();
+  assert.match(body.login, new RegExp(`^${ISSUER}/go/${PLATFORM}`));
+});
+
+test('بلا Sec-Fetch-Mode يُحكم بـAccept', async () => {
+  const { env, config } = setup();
+
+  const doc = await authenticate(
+    reqWith('/api/reports/download', { accept: 'text/html,application/xhtml+xml' }),
+    env,
+    config,
+  );
+  assert.equal(doc.response.status, 302);
+
+  const api = await authenticate(reqWith('/posts', { accept: 'application/json' }), env, config);
+  assert.equal(api.response.status, 401);
+});
+
+test('الرفض على نداء برمجي يردّ ٤٠٣ بجسم يُقرأ لا تحويلة داخلية', async () => {
+  const { kv, env, config } = setup({
+    member: { id: 'u1', role: 'writer', is_active: 0, perms: null },
+  });
+  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
+
+  await withFetch({}, async () => {
+    const { response } = await authenticate(
+      reqWith('/api/members', { cookie: 'naf_sid=s1', mode: 'cors' }),
+      env,
+      config,
+    );
+
+    // التحويلة هنا داخلية فيتبعها fetch بنجاح ويستقبل صفحةً نصّاً، فيسقط
+    // تحليل JSON بخطأ لا صلة له بالسبب — والعضو الموقوف يقرأ «خطأ تحليل».
+    assert.equal(response.status, 403);
+    const body = await response.json();
+    assert.equal(body.reason, 'inactive');
+    assert.equal(body.denied, '/denied?r=inactive');
+  });
+});
+
+test('الرفض على تنقّل يبقى تحويلةً إلى صفحة المنع', async () => {
+  const { kv, env, config } = setup({
+    member: { id: 'u1', role: 'writer', is_active: 0, perms: null },
+  });
+  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
+
+  await withFetch({}, async () => {
+    const { response } = await authenticate(
+      reqWith('/posts', { cookie: 'naf_sid=s1', mode: 'navigate' }),
+      env,
+      config,
+    );
+    assert.equal(response.headers.get('location'), '/denied?r=inactive');
+  });
+});
+
+test('الوسيط يعيد محتوى الرمز بعد التحقق منه في الطلب نفسه', async () => {
+  const { kv, env, config } = setup({
+    member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
+  });
+  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
+
+  await withFetch({}, async () => {
+    const { claims } = await authenticate(req('/posts', 'naf_sid=s1'), env, config);
+    // البريد والاسم من محتوى تحقّقنا منه، لا من فكّ ترميز بلا تحقّق.
+    assert.equal(claims.sub, 'u1');
+    assert.equal(claims.aud, PLATFORM);
+  });
 });
