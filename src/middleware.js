@@ -15,9 +15,41 @@ export function isPublicPath(pathname, config) {
   return config.publicPrefixes.some((prefix) => pathname.startsWith(prefix));
 }
 
-/** مسار واجهة برمجية: يُردّ عليه برمز حالة لا بتحويلة. */
+/** بادئة مسار مُعلنة كواجهة برمجية — تُستعمل حين لا يقول الطلب طبيعته. */
 function isApiPath(pathname, config) {
   return config.apiPrefixes.some((prefix) => pathname.startsWith(prefix));
+}
+
+/**
+ * هل هذا تنقّلٌ يعرض صفحة، أم نداءٌ برمجي ينتظر جسماً يُقرأ؟
+ *
+ * السؤال يتكرّر في كل ردّ يمنع المرور، والجواب يحدّد شكل الردّ: تحويلة
+ * لمن يتنقّل، ورمزُ حالة وجسمٌ لمن ينادي من كود.
+ *
+ * والحكم بطبيعة الطلب لا ببادئة مساره. البادئة تخطئ في حالة قائمة فعلاً:
+ * رابط تنزيلٍ تحت `‎/api/` تنقّلٌ من المستخدم، وردُّ `JSON` عليه يعرض عليه
+ * نصّاً خاماً مكان أن يعيده إلى الدخول. والعكس يقع كذلك — نداءُ `fetch`
+ * إلى مسارٍ خارج البادئات يأخذ تحويلةً لا يتبعها.
+ *
+ * والترتيب: `Sec-Fetch-Mode` أوّلاً — يقولها المتصفّح صراحةً — ثم `Accept`.
+ * فإن خلا الطلب منهما معاً (عميل لا يرسل ترويسات) رجعنا إلى `apiPrefixes`،
+ * وهي آخر ما يُسأل لا أوّله.
+ */
+export function wantsDocument(request, url, config) {
+  const mode = request.headers.get('sec-fetch-mode');
+  if (mode) return mode === 'navigate';
+
+  const accept = request.headers.get('accept');
+  if (accept) return accept.includes('text/html');
+
+  return !isApiPath(url.pathname, config);
+}
+
+function jsonResponse(body, status) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  });
 }
 
 function redirect(location, headers = {}) {
@@ -27,9 +59,24 @@ function redirect(location, headers = {}) {
   });
 }
 
-/** تحويل إلى صفحة الرفض برمز سبب أو بنصّ قادم من المركز. */
-export function deniedResponse(config, reason) {
-  return redirect(`${config.deniedPath}?r=${encodeURIComponent(reason)}`);
+/**
+ * الرفض برمز سبب أو بنصّ قادم من المركز.
+ *
+ * ولا يُحوَّل نداءٌ برمجي إلى `‎/denied`: التحويلة هنا **داخلية**، فيتبعها
+ * `fetch` بنجاح ويستقبل صفحة الواجهة نصّاً، فيسقط تحليل `JSON` عند اللوحة
+ * بخطأٍ لا صلة له بالسبب. فيقرأ العضو الموقوف «خطأ في التحليل» مكان مصطلح
+ * الرفض المسجَّل — وهي حالٌ تقع فعلاً: الرفض لا يأتي عند الدخول بل في أوّل
+ * طلب تالٍ لعضوٍ أُوقف ولوحتُه مفتوحة.
+ *
+ * والسبب يبقى رمزاً لا جملة: ترجمته إلى المصطلح المسجَّل عمل صفحة `‎/denied`.
+ */
+export function deniedResponse(request, config, reason) {
+  const path = `${config.deniedPath}?r=${encodeURIComponent(reason)}`;
+  const url = new URL(request.url);
+  if (!wantsDocument(request, url, config)) {
+    return jsonResponse({ ok: false, error: 'access_denied', reason, denied: path }, 403);
+  }
+  return redirect(path);
 }
 
 /** عنوان باب المركز لهذه المنصة، ومعه الوجهة المطلوبة. */
@@ -66,13 +113,7 @@ export async function startLogin(request, env, config) {
  * أطول من ذلك تبلغ هذا الردّ في كل مرة.
  */
 function unauthorizedResponse(request, config) {
-  return new Response(
-    JSON.stringify({ ok: false, error: 'unauthorized', login: loginUrl(request, config) }),
-    {
-      status: 401,
-      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-    },
-  );
+  return jsonResponse({ ok: false, error: 'unauthorized', login: loginUrl(request, config) }, 401);
 }
 
 /**
@@ -85,9 +126,9 @@ export async function authenticate(request, env, config) {
   if (isPublicPath(url.pathname, config)) return { public: true };
 
   const noSession = () =>
-    isApiPath(url.pathname, config)
-      ? unauthorizedResponse(request, config)
-      : redirect(loginUrl(request, config));
+    wantsDocument(request, url, config)
+      ? redirect(loginUrl(request, config))
+      : unauthorizedResponse(request, config);
 
   const sid = readCookie(request, config.cookieName);
   if (!sid) return { response: noSession() };
@@ -106,8 +147,9 @@ export async function authenticate(request, env, config) {
 
      ولا شبكة في المسار السويّ: المفاتيح مخبّأة في `KV`، فالكلفة قراءةُ
      مفتاح وتحقّقُ توقيع. */
+  let claims;
   try {
-    await verifyToken(session.token, env, config);
+    claims = await verifyToken(session.token, env, config);
   } catch (err) {
     if (config.onError) {
       config.onError(err instanceof AuthError ? err.code : 'session_verify_failed', err);
@@ -119,11 +161,16 @@ export async function authenticate(request, env, config) {
   }
 
   const member = await getMember(env, config, session.sub);
-  if (!member) return { response: deniedResponse(config, config.reasons.notMember) };
-  if (!member.isActive) return { response: deniedResponse(config, config.reasons.inactive) };
+  if (!member) return { response: deniedResponse(request, config, config.reasons.notMember) };
+  if (!member.isActive) {
+    return { response: deniedResponse(request, config, config.reasons.inactive) };
+  }
 
+  // `claims` معها: تحقّقنا منها في هذا الطلب نفسه، ومنصةٌ تحتاج البريد أو
+  // الاسم تأخذهما من هنا بدل أن تفكّ الرمز بنفسها بلا تحقّق.
   return {
     user: { id: member.id, role: member.role, perms: member.perms },
+    claims,
     session,
   };
 }

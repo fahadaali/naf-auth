@@ -83,7 +83,7 @@ export async function handleCallback(request, env, config) {
   if (!code) return startLogin(request, env, config);
 
   // بلا حالة لا مبادلة: المركز يرسلهما معاً، وغيابها يعني رابطاً مركّباً.
-  if (!state) return deniedResponse(config, config.reasons.badState);
+  if (!state) return deniedResponse(request, config, config.reasons.badState);
 
   try {
     const { token, next: exchangedNext } = await exchangeCode(code, state, env, config);
@@ -99,7 +99,7 @@ export async function handleCallback(request, env, config) {
 
     // الموقوف محلياً يُحوَّل إلى الرفض ولا تُفتح له جلسة.
     if (!member || !member.isActive) {
-      return deniedResponse(config, config.reasons.inactive);
+      return deniedResponse(request, config, config.reasons.inactive);
     }
 
     // جلسة بمعرّف عشوائي، تحمل الرمز الموقّع نفسه: الوسيط يعيد التحقق منه
@@ -129,7 +129,7 @@ export async function handleCallback(request, env, config) {
     const errorCode = err instanceof AuthError ? err.code : 'callback_failed';
     if (config.onError) config.onError(errorCode, err);
     // الرسالة للمستخدم رمز ثابت، لا تفصيل تقني.
-    return deniedResponse(config, config.reasons.authFailed);
+    return deniedResponse(request, config, config.reasons.authFailed);
   }
 }
 
