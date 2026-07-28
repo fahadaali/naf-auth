@@ -216,3 +216,142 @@ test('بلوغ مسار الاستقبال بلا رمز يبدأ الدخول �
      فيبدأ الدخول من أوّله. والمتصفّح يقطعها بـERR_TOO_MANY_REDIRECTS. */
   assert.equal(target.searchParams.has('next'), false);
 });
+
+// ─────────── الدخول يبلّغ المركز بالصلاحية ───────────
+//
+// العطل الذي يحرسه هذا: التبليغ كان في مسارات إدارة الأعضاء وحدها — منحٌ
+// أو سحبٌ أو ترقية، وكلها أفعال مسؤول. فعضوٌ يدخل ولا يمسّ أحدٌ دورَه لا
+// يُبلَّغ عنه شيء، وتقرأ اللوحة «لم يدخل المنصة بعد» عن عضوٍ داخلها.
+
+test('الدخول يبلّغ المركز بالصلاحية — بلا حالة، فلا يمسّ المنح', async () => {
+  const { handleCallback } = await import('../src/callback.js');
+  const { makeKey, sign } = await import('./keys.js');
+  const { fakeKV } = await import('./keys.js');
+
+  const key = await makeKey('k1');
+  const now = Math.floor(Date.now() / 1000);
+  const token = await sign(
+    key.pair.privateKey,
+    { alg: 'RS256', kid: 'k1' },
+    {
+      sub: 'u1',
+      name: 'فهد',
+      email: 'f@example.com',
+      iss: ISSUER,
+      aud: PLATFORM,
+      iat: now,
+      exp: now + 900,
+    },
+  );
+
+  const kv = fakeKV();
+  const env = {
+    AUTH_ISSUER: ISSUER,
+    PLATFORM_ID: PLATFORM,
+    AUTH_CLIENT_SECRET: 'sh-secret',
+    AUTH_KV: kv,
+    DB: {
+      prepare() {
+        return {
+          bind() {
+            return this;
+          },
+          async first() {
+            return { id: 'u1', role: 'editor', is_active: 1, perms: null };
+          },
+          async run() {
+            return { success: true };
+          },
+        };
+      },
+    },
+  };
+  const config = createConfig(env);
+
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (u, init = {}) => {
+    const href = String(u);
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push({ url: href, body });
+    if (href.endsWith('/.well-known/jwks.json')) return Response.json({ keys: [key.jwk] });
+    if (href.endsWith('/api/token')) return Response.json({ token, next: '/' });
+    if (href.endsWith('/api/internal/access')) return Response.json({ ok: true });
+    return new Response('not found', { status: 404 });
+  };
+
+  try {
+    const res = await handleCallback(
+      reqWith('/auth/callback?code=c1&state=s1', { mode: 'navigate' }),
+      env,
+      config,
+    );
+    assert.equal(res.status, 302);
+
+    const report = calls.find((c) => c.url.endsWith('/api/internal/access'));
+    assert.ok(report, 'الدخول يجب أن يبلّغ المركز');
+    assert.equal(report.body.role, 'editor');
+    assert.equal(report.body.email, 'f@example.com');
+    assert.equal(report.body.platformId, PLATFORM);
+    // بلا حالة: الدخول لا يغيّر منحاً ولا سحباً، وكتابتها تمحو سحباً مركزياً.
+    assert.equal('state' in report.body, false);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('تعذّر تبليغ الصلاحية لا يُسقط الدخول', async () => {
+  const { handleCallback } = await import('../src/callback.js');
+  const { makeKey, sign, fakeKV } = await import('./keys.js');
+
+  const key = await makeKey('k1');
+  const now = Math.floor(Date.now() / 1000);
+  const token = await sign(
+    key.pair.privateKey,
+    { alg: 'RS256', kid: 'k1' },
+    { sub: 'u1', email: 'f@example.com', iss: ISSUER, aud: PLATFORM, iat: now, exp: now + 900 },
+  );
+
+  const kv = fakeKV();
+  const env = {
+    AUTH_ISSUER: ISSUER,
+    PLATFORM_ID: PLATFORM,
+    AUTH_CLIENT_SECRET: 'sh-secret',
+    AUTH_KV: kv,
+    DB: {
+      prepare() {
+        return {
+          bind() { return this; },
+          async first() { return { id: 'u1', role: 'viewer', is_active: 1, perms: null }; },
+          async run() { return { success: true }; },
+        };
+      },
+    },
+  };
+  const seen = [];
+  const config = createConfig(env, { onError: (code) => seen.push(code) });
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async (u) => {
+    const href = String(u);
+    if (href.endsWith('/.well-known/jwks.json')) return Response.json({ keys: [key.jwk] });
+    if (href.endsWith('/api/token')) return Response.json({ token, next: '/' });
+    // المركز يردّ خطأً على التبليغ
+    if (href.endsWith('/api/internal/access')) return new Response('nope', { status: 500 });
+    return new Response('not found', { status: 404 });
+  };
+
+  try {
+    const res = await handleCallback(
+      reqWith('/auth/callback?code=c1&state=s1', { mode: 'navigate' }),
+      env,
+      config,
+    );
+    // العضو دخل، والناقص سطرٌ في لوحةٍ لا يراها.
+    assert.equal(res.status, 302);
+    assert.match(res.headers.get('set-cookie'), /naf_sid=/);
+    assert.ok(seen.includes('role_report_failed'));
+  } finally {
+    globalThis.fetch = original;
+  }
+});
