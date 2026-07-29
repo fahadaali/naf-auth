@@ -12,7 +12,7 @@ import { authenticate } from '../src/middleware.js';
 import { handleLogout, logoutTarget } from '../src/logout.js';
 import { reportAccessChange } from '../src/callback.js';
 import { fakeKV } from './keys.js';
-import { sha256Hex } from '../src/safe.js';
+import { sha256Hex, sessionKeyFor, userIndexKeyFor } from '../src/safe.js';
 
 /* سرُّ ربط الدخول بالمتصفّح — تجزئتُه هي ما يعيده المركز في ردّ المبادلة. */
 const BIND_NONCE = 'bind-nonce-for-tests';
@@ -49,7 +49,7 @@ test('الوجهة بعد الخروج هي المركز لا جذر المنص�
 
 test('تنقّلٌ للخروج: ٣٠٢ إلى المركز، والكوكي ممسوح، والجلسة محذوفة', async () => {
   const { kv, env, config } = setup();
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: 't', exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: 't', exp: 0 }));
 
   const response = await handleLogout(
     reqWith('/auth/logout', { cookie: 'naf_sid=s1', mode: 'navigate' }),
@@ -67,7 +67,7 @@ test('تنقّلٌ للخروج: ٣٠٢ إلى المركز، والكوكي م�
 
 test('نداء fetch للخروج: ٢٠٠ ومعه الوجهة نصّاً لا تحويلة', async () => {
   const { kv, env, config } = setup();
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: 't', exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: 't', exp: 0 }));
 
   const response = await handleLogout(
     reqWith('/auth/logout', { cookie: 'naf_sid=s1', mode: 'cors', method: 'POST' }),

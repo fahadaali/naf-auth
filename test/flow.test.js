@@ -11,7 +11,7 @@ import { createConfig } from '../src/index.js';
 import { authenticate, isPublicPath } from '../src/middleware.js';
 import { handleCallback, reportAccessChange } from '../src/callback.js';
 import { getMember, upsertMember } from '../src/store.js';
-import { sha256Hex } from '../src/safe.js';
+import { sha256Hex, sessionKeyFor, userIndexKeyFor } from '../src/safe.js';
 import { fakeKV, makeKey, sign } from './keys.js';
 
 const ISSUER = 'https://id.naf.example';
@@ -198,7 +198,7 @@ test('عضو موقوف محلياً يُرفض رغم رمزه الصالح', a
   const { kv, env, config } = setup({
     member: { id: 'u1', role: 'writer', is_active: 0, perms: null },
   });
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
 
   await withFetch({}, async () => {
     const { response, user } = await authenticate(req('/posts', 'naf_sid=s1'), env, config);
@@ -211,7 +211,7 @@ test('عضو نشط برمز صالح يُحقن في السياق بدوره و
   const { kv, env, config } = setup({
     member: { id: 'u1', role: 'general_manager', is_active: 1, perms: '{"x":true}' },
   });
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
 
   await withFetch({}, async () => {
     const { user, response } = await authenticate(req('/posts', 'naf_sid=s1'), env, config);
@@ -228,7 +228,7 @@ test('رمز الجلسة المنتهي يُبطل الجلسة ويعيد ال
   });
   const now = Math.floor(Date.now() / 1000);
   const stale = await token({ exp: now - 600 });
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: stale, exp: now - 600 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: stale, exp: now - 600 }));
 
   await withFetch({}, async () => {
     const { response, user } = await authenticate(req('/posts', 'naf_sid=s1'), env, config);
@@ -236,7 +236,7 @@ test('رمز الجلسة المنتهي يُبطل الجلسة ويعيد ال
     assert.equal(user, undefined, 'رمز منتهٍ يجب ألّا يمرّ ولو كان العضو نشطاً');
     assert.equal(response.status, 302);
     // الجلسة تُمسح فلا تُقرأ مرة أخرى.
-    assert.equal(kv.store.has('sess:s1'), false);
+    assert.equal(kv.store.has(await sessionKeyFor('s1')), false);
   });
 });
 
@@ -251,8 +251,8 @@ test('تعذّرُ جلب JWKS لا يمحو جلسةً صحيحة ويردّ ٥
   });
   const good = await token();
   const exp = Math.floor(Date.now() / 1000) + 900;
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: good, exp }));
-  await kv.put('usr:u1:s1', '1');
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: good, exp }));
+  await kv.put(await userIndexKeyFor('u1', 's1'), '1');
 
   const original = globalThis.fetch;
   globalThis.fetch = async () => new Response('bad gateway', { status: 502 });
@@ -261,8 +261,8 @@ test('تعذّرُ جلب JWKS لا يمحو جلسةً صحيحة ويردّ ٥
 
     assert.equal(user, undefined, 'لا يمرّ الطلب بلا تحقّق');
     assert.equal(response.status, 503, 'يقول «أعِد المحاولة» لا «سجّل الدخول»');
-    assert.equal(kv.store.has('sess:s1'), true, 'الجلسة تبقى: العطل في المركز لا في الرمز');
-    assert.equal(kv.store.has('usr:u1:s1'), true, 'ودليلُها معها');
+    assert.equal(kv.store.has(await sessionKeyFor('s1')), true, 'الجلسة تبقى: العطل في المركز لا في الرمز');
+    assert.equal(kv.store.has(await userIndexKeyFor('u1', 's1')), true, 'ودليلُها معها');
   } finally {
     globalThis.fetch = original;
   }
@@ -274,7 +274,7 @@ test('عودةُ المركز تُعيد الجلسة نفسها إلى العم
   });
   const good = await token();
   const exp = Math.floor(Date.now() / 1000) + 900;
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: good, exp }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: good, exp }));
 
   const original = globalThis.fetch;
   globalThis.fetch = async () => new Response('bad gateway', { status: 502 });
@@ -297,7 +297,7 @@ test('رمز موقّع بمفتاح آخر لا يمرّ ولو كانت الج
   });
   const forger = await makeKey('k1');
   const forged = await sign(forger.pair.privateKey, { alg: 'RS256', kid: 'k1' }, claims());
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: forged, exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: forged, exp: 0 }));
 
   await withFetch({}, async () => {
     const { response, user } = await authenticate(req('/posts', 'naf_sid=s1'), env, config);
@@ -750,7 +750,7 @@ test('الرفض على نداء برمجي يردّ ٤٠٣ بجسم يُقرأ 
   const { kv, env, config } = setup({
     member: { id: 'u1', role: 'writer', is_active: 0, perms: null },
   });
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
 
   await withFetch({}, async () => {
     const { response } = await authenticate(
@@ -772,7 +772,7 @@ test('الرفض على تنقّل يبقى تحويلةً إلى صفحة ال�
   const { kv, env, config } = setup({
     member: { id: 'u1', role: 'writer', is_active: 0, perms: null },
   });
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
 
   await withFetch({}, async () => {
     const { response } = await authenticate(
@@ -788,7 +788,7 @@ test('الوسيط يعيد محتوى الرمز بعد التحقق منه ف�
   const { kv, env, config } = setup({
     member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
   });
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: await token(), exp: 0 }));
 
   await withFetch({}, async () => {
     const { claims } = await authenticate(req('/posts', 'naf_sid=s1'), env, config);

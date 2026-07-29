@@ -15,6 +15,7 @@ import { createConfig, LOGOUT_PURPOSE } from '../src/index.js';
 import { handleBackchannelLogout } from '../src/logout.js';
 import { authenticate } from '../src/middleware.js';
 import { fakeKV, makeKey, sign } from './keys.js';
+import { sessionKeyFor, userIndexKeyFor } from '../src/safe.js';
 
 const ISSUER = 'https://id.naf.example';
 const PLATFORM = 'naf-test';
@@ -76,8 +77,8 @@ function post(body) {
 
 /** جلسة كاملة: المفتاح ودليلُه، كما يكتبهما مسار الاستقبال. */
 async function seedSession(kv, sid, sub = 'u1') {
-  await kv.put(`sess:${sid}`, JSON.stringify({ sub, token: 't', exp: 0 }));
-  await kv.put(`usr:${sub}:${sid}`, '1');
+  await kv.put(await sessionKeyFor(sid), JSON.stringify({ sub, token: 't', exp: 0 }));
+  await kv.put(await userIndexKeyFor(sub, sid), '1');
 }
 
 test('الإشعار يُنهي كل جلسات العضو ودليلَها', async () => {
@@ -105,8 +106,8 @@ test('ولا يمسّ جلسات غيره', async () => {
 
   await handleBackchannelLogout(post({ logoutToken: await logoutToken() }), env, config);
 
-  assert.equal(kv.store.has('sess:s1'), false);
-  assert.equal(kv.store.has('sess:s9'), true, 'خروج فلان أخرج غيره');
+  assert.equal(kv.store.has(await sessionKeyFor('s1')), false);
+  assert.equal(kv.store.has(await sessionKeyFor('s9')), true, 'خروج فلان أخرج غيره');
 });
 
 test('وبعده لا تفتح الجلسة الممحوّة شيئاً', async () => {
@@ -137,14 +138,14 @@ test('رمز الدخول لا يصلح إشعار خروج', async () => {
   const res = await handleBackchannelLogout(post({ logoutToken: await signed() }), env, config);
 
   assert.equal(res.status, 401);
-  assert.equal(kv.store.has('sess:s1'), true, 'رمز جلسة أنهى جلسة');
+  assert.equal(kv.store.has(await sessionKeyFor('s1')), true, 'رمز جلسة أنهى جلسة');
 });
 
 test('وإشعار الخروج لا يصلح رمز جلسة', async () => {
   const { kv, env, config } = setup();
   jwks(kv, (await key()).jwk);
   // الإشعار يصل إلى مسار عامّ، فمن التقطه لو قُبل جلسةً لدخل به.
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: await logoutToken(), exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: await logoutToken(), exp: 0 }));
 
   const { response, user } = await authenticate(
     new Request('https://naf-test.example/', { headers: { cookie: 'naf_sid=s1' } }),
@@ -166,7 +167,7 @@ test('إشعارٌ لمنصة أخرى يُردّ بـ aud', async () => {
     config,
   );
   assert.equal(res.status, 401);
-  assert.equal(kv.store.has('sess:s1'), true);
+  assert.equal(kv.store.has(await sessionKeyFor('s1')), true);
 });
 
 test('وإشعارٌ بتوقيع مفتاحٍ آخر يُردّ', async () => {
@@ -184,7 +185,7 @@ test('وإشعارٌ بتوقيع مفتاحٍ آخر يُردّ', async () => {
 
   const res = await handleBackchannelLogout(post({ logoutToken: forged }), env, config);
   assert.equal(res.status, 401);
-  assert.equal(kv.store.has('sess:s1'), true);
+  assert.equal(kv.store.has(await sessionKeyFor('s1')), true);
 });
 
 test('وإشعارٌ منتهٍ يُردّ', async () => {
@@ -199,7 +200,7 @@ test('وإشعارٌ منتهٍ يُردّ', async () => {
     config,
   );
   assert.equal(res.status, 401);
-  assert.equal(kv.store.has('sess:s1'), true);
+  assert.equal(kv.store.has(await sessionKeyFor('s1')), true);
 });
 
 test('وجسمٌ بلا رمز يُردّ ٤٠٠', async () => {

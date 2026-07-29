@@ -5,6 +5,8 @@ import {
   AuthError,
   newSessionId,
   readCookie,
+  sessionKeyFor,
+  userIndexKeyFor,
   safeNext,
   sessionCookie,
   sha256Hex,
@@ -281,7 +283,7 @@ export async function handleCallback(request, env, config) {
     const ttl = sessionTtl(claims.exp);
     const sid = newSessionId();
     await config.kv(env).put(
-      `sess:${sid}`,
+      await sessionKeyFor(sid),
       JSON.stringify({ sub: claims.sub, token, exp: claims.exp }),
       { expirationTtl: ttl },
     );
@@ -292,7 +294,7 @@ export async function handleCallback(request, env, config) {
        فلانٍ في هذه المنصة ليمحوها، ولا سبيل إلى ذلك بلا دليل.
        فيُكتب مفتاحٌ فارغ اسمه يحمل الطرفين، وعمره عمر الجلسة نفسه فيذهب
        معها ولا يتراكم. */
-    await config.kv(env).put(`usr:${claims.sub}:${sid}`, '1', { expirationTtl: ttl });
+    await config.kv(env).put(await userIndexKeyFor(claims.sub, sid), '1', { expirationTtl: ttl });
 
     // الجلسة صارت ثابتة. والتبليغ بعدها — انظر شرحه فوق.
     await reportRoleOnLogin(env, config, claims, member);

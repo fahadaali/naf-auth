@@ -167,6 +167,29 @@ export function bindCookie(name, value, maxAgeSeconds = 300) {
   return `${name}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}`;
 }
 
+/**
+ * أسماء مفاتيح الجلسة في KV — تجزئةُ المعرّف لا المعرّف.
+ *
+ * كان الاسم `sess:{sid}` و`sid` هو قيمة الكوكي حرفياً، والقيمة تحمل الرمز
+ * الموقّع. فمن قرأ مساحة KV — رمزُ API بصلاحية قراءة، أو نسخةٌ احتياطية —
+ * كان `list` يعطيه كوكيّات جلسات كل عضو بلا اشتقاق ولا تخمين: يُلصق الاسم
+ * في متصفّح فيصير صاحبَه.
+ *
+ * فصار الاسم تجزئةً لا يُشتقّ منها الكوكي. والمعرّف ٣٢ بايتاً عشوائية،
+ * فلا يُخمَّن ولا تنفع فيه جداول محسوبة — ولا حاجة إلى ملح.
+ *
+ * وأثرُ النشر: الجلسات القائمة تصير غير مقروءة مرّةً واحدة، فيعود أصحابها
+ * إلى المركز ويدخلون بلا كلمة مرور — جلسةُ المركز قائمة. وعمرُها خمس عشرة
+ * دقيقة على أبعد تقدير أصلاً.
+ */
+export async function sessionKeyFor(sid) {
+  return `sess:${await sha256Hex(sid)}`;
+}
+
+export async function userIndexKeyFor(sub, sid) {
+  return `usr:${sub}:${await sha256Hex(sid)}`;
+}
+
 /** تجزئة SHA-256 بالنظام السداسي عشري — لِما يُرسل بدل السرّ نفسه. */
 export async function sha256Hex(value) {
   const bytes = new TextEncoder().encode(value);

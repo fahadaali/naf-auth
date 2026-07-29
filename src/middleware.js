@@ -1,7 +1,16 @@
 // naf-auth — الوسيط
 // يحمي كل مسارات المنصة، ويحوّل غير المسجَّل إلى المركز، ويحقن المستخدم في السياق.
 
-import { AuthError, bindCookie, randomToken, readCookie, safeNext, sha256Hex } from './safe.js';
+import {
+  AuthError,
+  bindCookie,
+  randomToken,
+  readCookie,
+  safeNext,
+  sessionKeyFor,
+  sha256Hex,
+  userIndexKeyFor,
+} from './safe.js';
 import { getMember } from './store.js';
 import { isTokenError, verifyToken } from './verify.js';
 
@@ -198,7 +207,7 @@ export async function authenticate(request, env, config) {
   if (!sid) return { response: await noSession() };
 
   const kv = config.kv(env);
-  const session = await kv.get(`sess:${sid}`, 'json');
+  const session = await kv.get(await sessionKeyFor(sid), 'json');
 
   // الجلسة المنتهية تعود إلى المركز ولا تجدّد نفسها، وإلا بقي الموقوف
   // مركزياً يدخل حتى انتهاء كوكيه.
@@ -234,8 +243,8 @@ export async function authenticate(request, env, config) {
        دقائق لكل منصة — وهي أكثر من أن تُترك لحكمٍ خاطئ. */
     if (!isTokenError(err)) return { response: unavailableResponse() };
 
-    await kv.delete(`sess:${sid}`);
-    await kv.delete(`usr:${session.sub}:${sid}`);
+    await kv.delete(await sessionKeyFor(sid));
+    await kv.delete(await userIndexKeyFor(session.sub, sid));
     return { response: await noSession() };
   }
 

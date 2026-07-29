@@ -1,7 +1,7 @@
 // naf-auth — الخروج
 // يُنهي جلسة المنصة، ثم يُخرج المتصفّح منها إلى شبكة المنصات في المركز.
 
-import { clearCookie, readCookie } from './safe.js';
+import { clearCookie, readCookie, sessionKeyFor, userIndexKeyFor } from './safe.js';
 import { wantsDocument } from './middleware.js';
 import { verifyLogoutToken } from './verify.js';
 
@@ -51,9 +51,10 @@ export async function handleLogout(request, env, config) {
       const kv = config.kv(env);
       // الجلسة تُقرأ قبل محوها ليُمحى دليلُها معها: مفتاحٌ يتيم في الدليل
       // يجعل خروجاً لاحقاً من المركز يبحث عن جلسة لم تعد موجودة.
-      const session = await kv.get(`sess:${sid}`, 'json');
-      await kv.delete(`sess:${sid}`);
-      if (session && session.sub) await kv.delete(`usr:${session.sub}:${sid}`);
+      const key = await sessionKeyFor(sid);
+      const session = await kv.get(key, 'json');
+      await kv.delete(key);
+      if (session && session.sub) await kv.delete(await userIndexKeyFor(session.sub, sid));
     } catch (err) {
       if (config.onError) config.onError('logout_delete_failed', err);
     }
@@ -153,6 +154,7 @@ export async function handleBackchannelLogout(request, env, config) {
   } while (cursor);
 
   for (const name of keys) {
+    /* ما بعد البادئة تجزئةُ المعرّف، فمفتاح الجلسة يُبنى منها كما هي. */
     await kv.delete(`sess:${name.slice(prefix.length)}`);
     await kv.delete(name);
   }
