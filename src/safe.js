@@ -156,6 +156,24 @@ export function normaliseIssuer(issuer) {
   return typeof issuer === 'string' ? issuer.replace(/\/+$/, '') : issuer;
 }
 
+/**
+ * كوكي ربط الدخول بالمتصفّح.
+ *
+ * عمرُه خمس دقائق: رحلةُ الدخول ثوانٍ، وطولُه بلا فائدة يوسّع نافذة
+ * الالتقاط. و`SameSite=Lax` كي يصل مع العودة من المركز — وهي تنقّلٌ علويّ
+ * بطريقة `GET`، فـ`Strict` كان يمنعه فيسقط كل دخول.
+ */
+export function bindCookie(name, value, maxAgeSeconds = 300) {
+  return `${name}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}`;
+}
+
+/** تجزئة SHA-256 بالنظام السداسي عشري — لِما يُرسل بدل السرّ نفسه. */
+export async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 /** فكّ ترميز base64url إلى بايتات. */
 export function base64UrlToBytes(input) {
   const normalised = input.replace(/-/g, '+').replace(/_/g, '/');

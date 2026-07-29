@@ -11,6 +11,7 @@ import { createConfig } from '../src/index.js';
 import { authenticate, isPublicPath } from '../src/middleware.js';
 import { handleCallback, reportAccessChange } from '../src/callback.js';
 import { getMember, upsertMember } from '../src/store.js';
+import { sha256Hex } from '../src/safe.js';
 import { fakeKV, makeKey, sign } from './keys.js';
 
 const ISSUER = 'https://id.naf.example';
@@ -107,6 +108,29 @@ function setup({ member = null, secret = 'sh-secret' } = {}) {
 
 const req = (path, cookie) =>
   new Request(`https://platform.example${path}`, cookie ? { headers: { cookie } } : undefined);
+
+/* ═══ الدخول المربوط بالمتصفّح ═══
+
+   `startLogin` يضع سرّاً في كوكي `naf_sid_bind` ويرسل تجزئته إلى المركز،
+   والمركز يعيدها في ردّ المبادلة فيطابقها مسارُ الاستقبال.
+
+   فاستقبالٌ بلا كوكيٍّ وبلا تجزئةٍ عائدة يعني دخولاً بدأ من شبكة المركز،
+   ويُعاد بدؤه ليُربط — ولا تُفتح له جلسة في هذه اللفّة. فاختبارات الاستقبال
+   الناجح تحتاج الطرفين معاً: الكوكي هنا، والتجزئة في ردّ المبادلة. */
+const BIND_NONCE = 'bind-nonce-for-tests';
+let BIND_HASH = null;
+async function bindHash() {
+  if (!BIND_HASH) BIND_HASH = await sha256Hex(BIND_NONCE);
+  return BIND_HASH;
+}
+
+/** طلبُ استقبالٍ يحمل كوكي الربط. */
+const boundReq = (path) => req(path, `naf_sid_bind=${BIND_NONCE}`);
+
+/** ردُّ مبادلةٍ يحمل التجزئة المطابقة. */
+async function boundToken(over = {}) {
+  return Response.json({ token: await token(), next: '/', bind: await bindHash(), ...over });
+}
 
 /** طلب بترويسات: `mode` لـ`Sec-Fetch-Mode` و`accept` لترويسة القبول. */
 const reqWith = (path, { cookie, mode, accept } = {}) => {
@@ -308,17 +332,151 @@ test('الاستقبال بلا رمز يعيد التحويل إلى المرك
 
 test('الاستقبال بلا حالة يُرفض', async () => {
   const { env, config } = setup();
-  const res = await handleCallback(req('/auth/callback?code=c1'), env, config);
+  const res = await handleCallback(boundReq('/auth/callback?code=c1'), env, config);
   assert.equal(res.headers.get('location'), '/denied?r=bad_state');
+});
+
+// ──────────── ربط الدخول بالمتصفّح (منع تثبيت الجلسة) ────────────
+
+test('بدء الدخول يضع سرّ الربط في كوكي ويرسل تجزئته وحدها', async () => {
+  const { env, config } = setup();
+  const { response } = await authenticate(req('/posts'), env, config);
+
+  const setCookie = response.headers.get('set-cookie');
+  assert.match(setCookie, /naf_sid_bind=/, 'يجب أن يوضع كوكي الربط');
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /Secure/);
+  assert.match(setCookie, /SameSite=Lax/, 'وإلا لم يعد مع العودة من المركز');
+
+  const nonce = decodeURIComponent(setCookie.match(/naf_sid_bind=([^;]+)/)[1]);
+  const sent = new URL(response.headers.get('location')).searchParams.get('bind');
+
+  assert.equal(sent, await sha256Hex(nonce), 'المُرسَل تجزئةٌ لا السرّ');
+  assert.notEqual(sent, nonce, 'السرّ نفسه لا يغادر المتصفّح');
+});
+
+test('استقبالٌ بتجزئةٍ لا يملك متصفّحُه سرَّها يُردّ — وهي هجمة التثبيت', async () => {
+  const { kv, env, config } = setup({
+    member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
+  });
+
+  await withFetch({ '/api/token': async () => await boundToken() }, async () => {
+    // متصفّح الضحية: لا كوكي ربط فيه، والرمز صدر لمتصفّح المهاجم.
+    const res = await handleCallback(req('/auth/callback?code=c1&state=s'), env, config);
+
+    assert.equal(res.headers.get('location'), '/denied?r=bad_state');
+    assert.equal(
+      kv.puts.some((p) => p.key.startsWith('sess:')),
+      false,
+      'لا تُفتح جلسة، ولا يُترك أثر',
+    );
+  });
+});
+
+test('استقبالٌ بتجزئةٍ تخالف سرَّ الكوكي يُردّ كذلك', async () => {
+  const { kv, env, config } = setup({
+    member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
+  });
+
+  await withFetch(
+    { '/api/token': async () => await boundToken({ bind: 'f'.repeat(64) }) },
+    async () => {
+      const res = await handleCallback(boundReq('/auth/callback?code=c1&state=s'), env, config);
+      assert.equal(res.headers.get('location'), '/denied?r=bad_state');
+      assert.equal(kv.puts.some((p) => p.key.startsWith('sess:')), false);
+    },
+  );
+});
+
+test('دخولٌ بدأ من شبكة المركز يُعاد بدؤه ليُربط — لفّةً واحدة لا تتكرّر', async () => {
+  const { env, config } = setup({
+    member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
+  });
+
+  await withFetch(
+    // مركزٌ لم يُعِد تجزئة، ومتصفّحٌ لا كوكي فيه: بطاقةٌ من الشبكة.
+    { '/api/token': async () => Response.json({ token: await token(), next: '/' }) },
+    async () => {
+      const res = await handleCallback(req('/auth/callback?code=c1&state=s'), env, config);
+
+      assert.equal(res.status, 302);
+      const location = new URL(res.headers.get('location'));
+      assert.equal(location.origin + location.pathname, `${ISSUER}/go/${PLATFORM}`);
+      assert.ok(location.searchParams.get('bind'), 'واللفّة الثانية تحمل تجزئة');
+      assert.match(res.headers.get('set-cookie'), /naf_sid_bind=/);
+
+      /* والوجهة ليست مسارَ الاستقبال: الرمز الذي فيه استُهلك، فالعودة إليه
+         بعد دخولٍ تمّ تفشل حتماً ويقرأ صاحبُها رفضاً بلا سبب. */
+      const next = location.searchParams.get('next');
+      assert.ok(
+        next === null || !next.startsWith('/auth/callback'),
+        `الوجهة يجب ألّا تكون مسار الاستقبال: ${next}`,
+      );
+    },
+  );
+});
+
+test('اللفّة تحفظ الوجهة المقصودة ولا تعيدها إلى مسار الاستقبال', async () => {
+  const { env, config } = setup({
+    member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
+  });
+
+  await withFetch(
+    { '/api/token': async () => Response.json({ token: await token(), next: '/' }) },
+    async () => {
+      const res = await handleCallback(
+        req('/auth/callback?code=c1&state=s&next=%2Freports%2F7'),
+        env,
+        config,
+      );
+      const next = new URL(res.headers.get('location')).searchParams.get('next');
+      assert.equal(next, '/reports/7', 'ما قصده صاحبُه يبقى مقصوداً بعد اللفّة');
+    },
+  );
+});
+
+test('مركزٌ أقدم لا يُعيد تجزئة: الدخول يمضي ولا ينكسر', async () => {
+  const { kv, env, config } = setup({
+    member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
+  });
+
+  await withFetch(
+    { '/api/token': async () => Response.json({ token: await token(), next: '/' }) },
+    async () => {
+      // الكوكي موجود — أي أننا أرسلنا ربطاً ولم يُعِده المركز.
+      const res = await handleCallback(boundReq('/auth/callback?code=c1&state=s'), env, config);
+
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/', 'يمضي إلى الوجهة لا إلى المركز');
+      assert.ok(kv.puts.some((p) => p.key.startsWith('sess:')), 'وتُفتح جلسة');
+    },
+  );
+});
+
+test('الاستقبال الناجح يمحو كوكي الربط — سرٌّ أدّى عمله لا يُترك', async () => {
+  const { env, config } = setup({
+    member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
+  });
+
+  await withFetch({ '/api/token': async () => await boundToken() }, async () => {
+    const res = await handleCallback(boundReq('/auth/callback?code=c1&state=s'), env, config);
+    const cookies = res.headers.getSetCookie();
+
+    assert.ok(cookies.some((c) => /^naf_sid=/.test(c)), 'كوكي الجلسة يُفتح');
+    assert.ok(
+      cookies.some((c) => /^naf_sid_bind=;/.test(c) && /Max-Age=0/.test(c)),
+      'وكوكي الربط يُمحى',
+    );
+  });
 });
 
 test('المبادلة ترسل الحقول الأربعة بأسماء المركز، والحالة كما وصلت', async () => {
   const { env, config } = setup({ member: { id: 'u1', role: 'admin', is_active: 1, perms: null } });
 
   await withFetch(
-    { '/api/token': async () => Response.json({ token: await token(), tokenType: 'Bearer', expiresIn: 900, next: '/' }) },
+    { '/api/token': async () => await boundToken({ tokenType: 'Bearer', expiresIn: 900 }) },
     async (calls) => {
-      await handleCallback(req('/auth/callback?code=c1&state=STATE-FROM-CENTER'), env, config);
+      await handleCallback(boundReq('/auth/callback?code=c1&state=STATE-FROM-CENTER'), env, config);
 
       const exchange = calls.find((c) => c.url.endsWith('/api/token'));
       assert.ok(exchange, 'يجب أن تقع المبادلة');
@@ -339,9 +497,9 @@ test('الاستقبال الناجح يفتح جلسة عمرها عمر الر
   });
 
   await withFetch(
-    { '/api/token': async () => Response.json({ token: await token(), next: '/' }) },
+    { '/api/token': async () => await boundToken() },
     async () => {
-      const res = await handleCallback(req('/auth/callback?code=c1&state=s'), env, config);
+      const res = await handleCallback(boundReq('/auth/callback?code=c1&state=s'), env, config);
       assert.equal(res.status, 302);
 
       const put = kv.puts.find((p) => p.key.startsWith('sess:'));
@@ -362,7 +520,7 @@ test('الوجهة العائدة من المبادلة تُنقّى قبل ال
     await withFetch(
       { '/api/token': async () => Response.json({ token: await token(), next: hostile }) },
       async () => {
-        const res = await handleCallback(req('/auth/callback?code=c1&state=s'), env, config);
+        const res = await handleCallback(boundReq('/auth/callback?code=c1&state=s'), env, config);
         assert.equal(res.headers.get('location'), '/', `${hostile} يجب أن يعود إلى الجذر`);
       },
     );
@@ -375,7 +533,7 @@ test('وجهة سليمة من المبادلة تُتَّبع', async () => {
   await withFetch(
     { '/api/token': async () => Response.json({ token: await token(), next: '/transactions' }) },
     async () => {
-      const res = await handleCallback(req('/auth/callback?code=c1&state=s'), env, config);
+      const res = await handleCallback(boundReq('/auth/callback?code=c1&state=s'), env, config);
       assert.equal(res.headers.get('location'), '/transactions');
     },
   );
@@ -387,7 +545,7 @@ test('رفض المركز للمبادلة يعطي رمزاً عاماً ولا
   await withFetch(
     { '/api/token': () => new Response(JSON.stringify({ error: 'invalid_code' }), { status: 400 }) },
     async () => {
-      const res = await handleCallback(req('/auth/callback?code=c1&state=s'), env, config);
+      const res = await handleCallback(boundReq('/auth/callback?code=c1&state=s'), env, config);
       assert.equal(res.headers.get('location'), '/denied?r=auth_failed');
     },
   );
@@ -398,7 +556,7 @@ test('بلا سرّ لا تقع المبادلة أصلاً', async () => {
   const { env, config } = setup({ secret: null });
 
   await withFetch({}, async (calls) => {
-    const res = await handleCallback(req('/auth/callback?code=c1&state=s'), env, config);
+    const res = await handleCallback(boundReq('/auth/callback?code=c1&state=s'), env, config);
     assert.equal(res.headers.get('location'), '/denied?r=auth_failed');
     assert.equal(calls.length, 0, 'لا طلب يحمل سرّاً مفقوداً');
   });

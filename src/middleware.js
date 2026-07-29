@@ -1,7 +1,7 @@
 // naf-auth — الوسيط
 // يحمي كل مسارات المنصة، ويحوّل غير المسجَّل إلى المركز، ويحقن المستخدم في السياق.
 
-import { AuthError, readCookie, safeNext } from './safe.js';
+import { AuthError, bindCookie, randomToken, readCookie, safeNext, sha256Hex } from './safe.js';
 import { getMember } from './store.js';
 import { isTokenError, verifyToken } from './verify.js';
 
@@ -102,17 +102,36 @@ function loginUrl(request, config) {
 }
 
 /**
- * بدء الدخول: تحويلة إلى باب المركز.
+ * بدء الدخول: تحويلة إلى باب المركز، ومعها ربطٌ بهذا المتصفّح.
  *
- * ولا حالة عابرة تُولَّد هنا: `‎/go/:id` يتجاهل أي `state` يصله ويولّد
- * واحدة من عنده، فحالةٌ من طرفنا لا تعود إلينا أبداً — ومطابقتها عند
- * الاستقبال تفشل حتماً فتُسقط كل دخول.
+ * `state` يولّده المركز ويطابقه عند المبادلة — وهو يثبت أن الرمز والحالة
+ * جاءا معاً من المركز، **ولا يثبت شيئاً عن المتصفّح الواصل**: الاثنان
+ * يسافران في التحويلة نفسها، فمن ملك أحدهما ملك الآخر.
  *
- * والوجهة تُحمل في الرابط: المركز يعلّقها على مسار الاستقبال عند التحويل،
- * ويعيدها ثانيةً في ردّ المبادلة.
+ * وهذه هي ثغرة تثبيت الجلسة: يفتح المهاجم `‎{issuer}/go/:id` في متصفّحه،
+ * يلتقط `‎…/auth/callback?code=C&state=S` ولا يتبعه، ثم يدفع الضحية إليه
+ * خلال الستين ثانية. فتتمّ المبادلة وتُفتح جلسةٌ بهوية **المهاجم** في
+ * متصفّح **الضحية** — فترفع ملفاتها وتكتب مسوّداتها في حسابه، ويقرؤها
+ * بدخوله العادي. و`SameSite=Lax` لا تمنع شيئاً: الوصول تنقّلٌ علويّ بـ`GET`.
+ *
+ * فيُولَّد هنا سرٌّ عشوائي يبقى في كوكي على هذا المتصفّح وحده، ولا يسافر:
+ * الذي يسافر تجزئتُه. والمركز يخزّنها مع رمز العبور ويعيدها في ردّ
+ * المبادلة، فيطابق مسارُ الاستقبال تجزئةَ الكوكي بما عاد. ومتصفّحُ الضحية
+ * لا كوكي فيه، فتُردّ المحاولة.
  */
 export async function startLogin(request, env, config) {
-  return redirect(loginUrl(request, config));
+  const nonce = randomToken(32);
+  const target = new URL(loginUrl(request, config));
+  target.searchParams.set('bind', await sha256Hex(nonce));
+
+  return redirect(target.toString(), {
+    'set-cookie': bindCookie(bindCookieName(config), nonce),
+  });
+}
+
+/** اسم كوكي الربط — مشتقٌّ من اسم كوكي الجلسة فلا يصطدم بمنصةٍ أخرى. */
+export function bindCookieName(config) {
+  return `${config.cookieName}_bind`;
 }
 
 /**
@@ -163,20 +182,27 @@ export async function authenticate(request, env, config) {
 
   if (isPublicPath(url.pathname, config)) return { public: true };
 
-  const noSession = () =>
+  /* التنقّل يمرّ بـ`startLogin` لا بتحويلةٍ مباشرة: هو الذي يولّد سرّ الربط
+     ويضعه في كوكي ويرسل تجزئته. وهذا هو المدخل الغالب — الرمز يعيش خمس عشرة
+     دقيقة، فكل لوحةٍ مفتوحة أطول من ذلك تمرّ من هنا.
+
+     أمّا نداء `fetch` فيأخذ ٤٠١ ومعه عنوان الباب كما كان: لا كوكي يُوضع في
+     ردٍّ لا يتنقّل به المتصفّح، والتنقّل الذي يليه يبلغ المركز بلا ربط —
+     فيلتقطه مسارُ الاستقبال ويعيد بدأه مربوطاً. */
+  const noSession = async () =>
     wantsDocument(request, url, config)
-      ? redirect(loginUrl(request, config))
+      ? startLogin(request, env, config)
       : unauthorizedResponse(request, config);
 
   const sid = readCookie(request, config.cookieName);
-  if (!sid) return { response: noSession() };
+  if (!sid) return { response: await noSession() };
 
   const kv = config.kv(env);
   const session = await kv.get(`sess:${sid}`, 'json');
 
   // الجلسة المنتهية تعود إلى المركز ولا تجدّد نفسها، وإلا بقي الموقوف
   // مركزياً يدخل حتى انتهاء كوكيه.
-  if (!session || !session.sub || !session.token) return { response: noSession() };
+  if (!session || !session.sub || !session.token) return { response: await noSession() };
 
   /* ═══ التحقق في كل طلب محمي، لا عند الاستقبال وحده ═══
      الرمز يعيش خمس عشرة دقيقة، وهذا الفحص هو ما يجعل لقِصَره معنى: بلا
@@ -210,7 +236,7 @@ export async function authenticate(request, env, config) {
 
     await kv.delete(`sess:${sid}`);
     await kv.delete(`usr:${session.sub}:${sid}`);
-    return { response: noSession() };
+    return { response: await noSession() };
   }
 
   const member = await getMember(env, config, session.sub);
