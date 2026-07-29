@@ -126,6 +126,24 @@ export function createConfig(env, overrides = {}) {
 
   return {
     issuer: normaliseIssuer(required(overrides.issuer || env.AUTH_ISSUER, 'AUTH_ISSUER')),
+
+    /* ═══ مُصدِرٌ سابق يُقبل في التحقق وحده ═══
+     *
+     * `iss` يُقارَن مقارنةً حرفية، فنقلُ المركز إلى نطاقٍ مخصّص كان يستحيل
+     * بلا انقطاع: تحديثُ المنصات أوّلاً يجعلها ترفض الرموز القديمة، وتحديثُ
+     * المركز أوّلاً يجعلها ترفض الجديدة. وREADME يصف الإجراء بأن «تقبل كلُّ
+     * منصة المُصدِرَين في هذه المدّة» — ولم يكن لذلك سبيل في الكود.
+     *
+     * فصار `AUTH_ISSUER_PREVIOUS` يُقبل **للتحقق من الرموز وحده**: لا يُبنى
+     * منه عنوان `JWKS` ولا يُحوَّل إليه أحد. والباب يبقى `AUTH_ISSUER`.
+     *
+     * ويُرفع بعد انقضاء مدّة النقل — تركُه مفتوحاً يُبقي نطاقاً مهجوراً
+     * مقبولاً، ومن ملكه بعدنا وقّع رموزاً نقبلها. */
+    previousIssuer: overrides.previousIssuer
+      ? normaliseIssuer(overrides.previousIssuer)
+      : env.AUTH_ISSUER_PREVIOUS
+        ? normaliseIssuer(env.AUTH_ISSUER_PREVIOUS)
+        : null,
     platformId: required(overrides.platformId || env.PLATFORM_ID, 'PLATFORM_ID'),
 
     // الأسماء وحدها هنا، لا القيم: السرّ يُقرأ من `env` عند الحاجة إليه.

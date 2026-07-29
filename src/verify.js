@@ -228,9 +228,16 @@ async function verifySigned(token, env, config, expectedPurpose) {
   const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, signingInput);
   if (!valid) throw new AuthError('bad_signature');
 
-  // مقارنةٌ حرفية. و`config.issuer` وُحّدت صورتُه مرة واحدة عند بناء
-  // الإعداد، فما يُقارَن هنا هو `iss` كما وقّعه المركز بلا تطبيع.
-  if (payload.iss !== config.issuer) throw new AuthError('bad_issuer');
+  /* مقارنةٌ حرفية. و`config.issuer` وُحّدت صورتُه مرة واحدة عند بناء
+     الإعداد، فما يُقارَن هنا هو `iss` كما وقّعه المركز بلا تطبيع.
+
+     و`previousIssuer` يُقبل معه إن ضُبط — لمدّة نقل المركز إلى نطاق مخصّص
+     وحدها، وهي المدّة التي يصف README إجراءها. ولا يُبنى منه عنوان `JWKS`
+     ولا يُحوَّل إليه أحد: هو مقبولٌ في التحقق لا بابٌ ثانٍ. */
+  const issuerMatches =
+    payload.iss === config.issuer ||
+    (config.previousIssuer ? payload.iss === config.previousIssuer : false);
+  if (!issuerMatches) throw new AuthError('bad_issuer');
   if (!audienceMatches(payload.aud, config.platformId)) throw new AuthError('bad_audience');
 
   const now = Math.floor(Date.now() / 1000);

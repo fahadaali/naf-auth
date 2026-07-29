@@ -116,6 +116,7 @@ AUTH_ISSUER = "https://id.naf.sa"
 | `AUTH_DB_BINDING` | `DB` | ارتباط `D1` باسم آخر |
 | `AUTH_KV_BINDING` | `AUTH_KV` | ارتباط `KV` باسم آخر |
 | `AUTH_COOKIE_NAME` | `naf_sid` | |
+| `AUTH_ISSUER_PREVIOUS` | — | مدّةَ نقل المركز إلى نطاق مخصّص وحدها — انظر أدناه |
 
 ### ٥ — اضبط السرّ
 

@@ -312,3 +312,58 @@ test('سيلٌ من kid مجهول لا يُجبر إلا جلباً واحدا�
     s.restore();
   }
 });
+
+// ───────── مُصدِرٌ سابق: يُقبل في التحقق وحده ─────────
+
+test('AUTH_ISSUER_PREVIOUS يجعل رموز المُصدِر القديم تمرّ أثناء النقل', async () => {
+  const key = await makeKey('k1');
+  const s = setup({ current: [key.jwk] });
+  try {
+    const OLD = 'https://naf-id.pages.dev';
+    const config = { ...s.config, issuer: 'https://id.naf.sa', previousIssuer: OLD };
+
+    const now = Math.floor(Date.now() / 1000);
+    const token = await sign(key.pair.privateKey, { alg: 'RS256', kid: 'k1' }, {
+      sub: 'u1', iss: OLD, aud: PLATFORM, iat: now, exp: now + 900,
+    });
+
+    const claims = await verifyToken(token, {}, config);
+    assert.equal(claims.iss, OLD, 'رمزُ المُصدِر القديم يمرّ في مدّة النقل');
+  } finally {
+    s.restore();
+  }
+});
+
+test('ومُصدِرٌ ثالث لا يمرّ ولو ضُبط السابق', async () => {
+  const key = await makeKey('k1');
+  const s = setup({ current: [key.jwk] });
+  try {
+    const config = {
+      ...s.config,
+      issuer: 'https://id.naf.sa',
+      previousIssuer: 'https://naf-id.pages.dev',
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const forged = await sign(key.pair.privateKey, { alg: 'RS256', kid: 'k1' }, {
+      sub: 'u1', iss: 'https://evil.example', aud: PLATFORM, iat: now, exp: now + 900,
+    });
+    await assert.rejects(() => verifyToken(forged, {}, config), /bad_issuer/);
+  } finally {
+    s.restore();
+  }
+});
+
+test('وبلا ضبطِ السابق يبقى المُصدِر واحداً', async () => {
+  const key = await makeKey('k1');
+  const s = setup({ current: [key.jwk] });
+  try {
+    const config = { ...s.config, issuer: 'https://id.naf.sa' };
+    const now = Math.floor(Date.now() / 1000);
+    const old = await sign(key.pair.privateKey, { alg: 'RS256', kid: 'k1' }, {
+      sub: 'u1', iss: 'https://naf-id.pages.dev', aud: PLATFORM, iat: now, exp: now + 900,
+    });
+    await assert.rejects(() => verifyToken(old, {}, config), /bad_issuer/);
+  } finally {
+    s.restore();
+  }
+});
