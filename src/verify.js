@@ -29,6 +29,14 @@ const ALG = 'RS256';
 const JWKS_TIMEOUT_MS = 3000;
 
 /**
+ * مهلة بين إجبارَي جلبٍ متتاليين عند `kid` مجهول.
+ *
+ * ستون ثانية: أقلُّ ما يقبله `KV` عمراً، وهو كافٍ — التدوير حدثٌ واحد لا
+ * سيل، فأوّلُ طلبٍ بعده يجلب المفتاح الجديد ويخبّئه لمن يليه.
+ */
+const FORCE_COOLDOWN_SECONDS = 60;
+
+/**
  * أخطاء الرمز نفسه — يقابلها أخطاءُ عجزِ المتحقّق (`jwks_unavailable`
  * و`jwks_malformed` وما ليس `AuthError` أصلاً).
  *
@@ -184,11 +192,35 @@ async function verifySigned(token, env, config, expectedPurpose) {
   let jwks = await loadJwks(env, config);
   let jwk = findKey(jwks, header.kid);
 
-  // الاحتراز الخامس في §١٠: معرّف مفتاح غير معروف يعيد الجلب فوراً،
-  // وإلا تعطّلت المنصة ساعة كاملة عند كل تدوير مفاتيح.
+  /* الاحتراز الخامس في §١٠: معرّف مفتاح غير معروف يعيد الجلب فوراً، وإلا
+     تعطّلت المنصة عند كل تدوير مفاتيح حتى ينقضي المخبأ.
+
+     ═══ لكنّ إعادة الجلب لا تُترك بلا سقف ═══
+
+     `‎/auth/backchannel-logout` مسارٌ عامّ بلا مصادقة — وهو كذلك بالضرورة،
+     فالمنادي خادمُ المركز لا متصفّح. ورمزٌ مركَّب بـ`kid` عشوائي يجتاز
+     فحصَي `alg` و`kid` ويبلغ هذا السطر **قبل التحقق من التوقيع**: فحصُ
+     التوقيع يحتاج المفتاح، والمفتاح هو ما يُجلب. فكلُّ طلبٍ مزوَّر كان
+     يُجبر جلباً شبكياً إلى المركز وكتابةً في `KV` — بلا حدّ، ومن أي أحد.
+     فتصير المنصةُ مضخِّمَ حِملٍ على مركزها.
+
+     فيُقيَّد الإجبار بمهلةٍ قصيرة: أوّلُ `kid` مجهول يجلب، وما يليه خلال
+     المهلة يُردّ بلا شبكة. والتدوير لا يتأثّر — هو حدثٌ واحد لا سيلٌ،
+     وأوّلُ طلبٍ بعده يجلب المفتاح الجديد ويخبّئه للبقية. */
   if (!jwk) {
-    jwks = await loadJwks(env, config, true);
-    jwk = findKey(jwks, header.kid);
+    const cooldownKey = `jwksforce:${config.issuer}`;
+    const kv = config.kv(env);
+    const cooling = await kv.get(cooldownKey);
+
+    if (!cooling) {
+      try {
+        await kv.put(cooldownKey, '1', { expirationTtl: FORCE_COOLDOWN_SECONDS });
+      } catch {
+        /* تعذّرُ كتابة المهلة لا يمنع الجلب — الحدّ تحسينٌ لا شرط. */
+      }
+      jwks = await loadJwks(env, config, true);
+      jwk = findKey(jwks, header.kid);
+    }
   }
   if (!jwk) throw new AuthError('unknown_kid');
 
