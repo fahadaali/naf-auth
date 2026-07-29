@@ -24,7 +24,9 @@ export {
 export {
   verifyToken,
   verifyLogoutToken,
+  isTokenError,
   LOGOUT_PURPOSE,
+  TOKEN_ERRORS,
   CLOCK_SKEW_SECONDS,
   JWKS_TTL_SECONDS,
 } from './verify.js';
@@ -42,10 +44,22 @@ export {
 } from './safe.js';
 
 /**
- * المسارات العامة المكتوبة صراحةً: مسار الاستقبال، وصفحة الرفض، وفحص
- * الصحة. وأي مسار جديد خارج هذه القائمة محمي افتراضياً.
+ * المسارات العامة المكتوبة صراحةً: مسار الاستقبال، وإشعار الخروج الخلفي،
+ * وصفحة الرفض، وفحص الصحة. وأي مسار جديد خارج هذه القائمة محمي افتراضياً.
+ *
+ * وإشعارُ الخروج الخلفي منها لأن حراسته توقيعُ المركز لا جلسةُ متصفّح:
+ * المنادي خادمٌ لا متصفّح، ولا كوكي معه يُحرَس به. وحمايتُه بالوسيط تجعله
+ * يُردّ بتحويلةٍ إلى `‎/go/:id` — و`fetch` في المركز يتبعها، فتصل صفحةُ
+ * الواجهة بـ٢٠٠ ويقرأ المركزُ فشلَه نجاحاً، وتبقى الجلسة حيّة بلا سطر خطأ
+ * في أي سجلّ. والمسار مشتقٌّ في المركز حرفياً من `lib/backchannel.js`،
+ * فاسمه عقدٌ لا خيار.
  */
-const DEFAULT_PUBLIC_PATHS = ['/auth/callback', '/denied', '/health'];
+const DEFAULT_PUBLIC_PATHS = [
+  '/auth/callback',
+  '/auth/backchannel-logout',
+  '/denied',
+  '/health',
+];
 
 /** الأصول الساكنة — بادئات مُعلنة لا اجتهاد على الامتداد. */
 const DEFAULT_PUBLIC_PREFIXES = ['/assets/'];
@@ -112,6 +126,24 @@ export function createConfig(env, overrides = {}) {
 
   return {
     issuer: normaliseIssuer(required(overrides.issuer || env.AUTH_ISSUER, 'AUTH_ISSUER')),
+
+    /* ═══ مُصدِرٌ سابق يُقبل في التحقق وحده ═══
+     *
+     * `iss` يُقارَن مقارنةً حرفية، فنقلُ المركز إلى نطاقٍ مخصّص كان يستحيل
+     * بلا انقطاع: تحديثُ المنصات أوّلاً يجعلها ترفض الرموز القديمة، وتحديثُ
+     * المركز أوّلاً يجعلها ترفض الجديدة. وREADME يصف الإجراء بأن «تقبل كلُّ
+     * منصة المُصدِرَين في هذه المدّة» — ولم يكن لذلك سبيل في الكود.
+     *
+     * فصار `AUTH_ISSUER_PREVIOUS` يُقبل **للتحقق من الرموز وحده**: لا يُبنى
+     * منه عنوان `JWKS` ولا يُحوَّل إليه أحد. والباب يبقى `AUTH_ISSUER`.
+     *
+     * ويُرفع بعد انقضاء مدّة النقل — تركُه مفتوحاً يُبقي نطاقاً مهجوراً
+     * مقبولاً، ومن ملكه بعدنا وقّع رموزاً نقبلها. */
+    previousIssuer: overrides.previousIssuer
+      ? normaliseIssuer(overrides.previousIssuer)
+      : env.AUTH_ISSUER_PREVIOUS
+        ? normaliseIssuer(env.AUTH_ISSUER_PREVIOUS)
+        : null,
     platformId: required(overrides.platformId || env.PLATFORM_ID, 'PLATFORM_ID'),
 
     // الأسماء وحدها هنا، لا القيم: السرّ يُقرأ من `env` عند الحاجة إليه.

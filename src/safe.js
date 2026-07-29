@@ -99,7 +99,15 @@ export function clearCookie(name) {
   return `${name}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`;
 }
 
-/** قراءة كوكي بالتقسيم لا بتعبير نمطي — اسم الكوكي لا يُقحَم في نمط. */
+/**
+ * قراءة كوكي بالتقسيم لا بتعبير نمطي — اسم الكوكي لا يُقحَم في نمط.
+ *
+ * وكوكيٌّ بالاسم نفسه قد يتكرّر: المتصفّح يرسل نسخةً لكل `Domain` و`Path`
+ * كتبتها، ولا يقول أيُّها من أين. فواحدٌ تالفٌ لا يُنهي البحث — يُتخطّى
+ * ويُكمَل إلى التالي. والوقوفُ عنده يُخرج صاحبَ جلسةٍ صحيحة لأن نسخةً
+ * قديمة بالاسم نفسه تعذّر فكّ ترميزها، وهي حالٌ لا يملك صاحبها إصلاحها
+ * إلا بمسح كوكيّات الموقع يدوياً.
+ */
 export function readCookie(request, name) {
   const header = request.headers.get('cookie');
   if (!header) return null;
@@ -110,7 +118,7 @@ export function readCookie(request, name) {
     try {
       return decodeURIComponent(part.slice(eq + 1).trim());
     } catch {
-      return null;
+      /* نسخةٌ تالفة بالاسم نفسه: تُتخطّى، والبحث يمضي. */
     }
   }
   return null;
@@ -146,6 +154,47 @@ export function assertIdentifier(value, label) {
  */
 export function normaliseIssuer(issuer) {
   return typeof issuer === 'string' ? issuer.replace(/\/+$/, '') : issuer;
+}
+
+/**
+ * كوكي ربط الدخول بالمتصفّح.
+ *
+ * عمرُه خمس دقائق: رحلةُ الدخول ثوانٍ، وطولُه بلا فائدة يوسّع نافذة
+ * الالتقاط. و`SameSite=Lax` كي يصل مع العودة من المركز — وهي تنقّلٌ علويّ
+ * بطريقة `GET`، فـ`Strict` كان يمنعه فيسقط كل دخول.
+ */
+export function bindCookie(name, value, maxAgeSeconds = 300) {
+  return `${name}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}`;
+}
+
+/**
+ * أسماء مفاتيح الجلسة في KV — تجزئةُ المعرّف لا المعرّف.
+ *
+ * كان الاسم `sess:{sid}` و`sid` هو قيمة الكوكي حرفياً، والقيمة تحمل الرمز
+ * الموقّع. فمن قرأ مساحة KV — رمزُ API بصلاحية قراءة، أو نسخةٌ احتياطية —
+ * كان `list` يعطيه كوكيّات جلسات كل عضو بلا اشتقاق ولا تخمين: يُلصق الاسم
+ * في متصفّح فيصير صاحبَه.
+ *
+ * فصار الاسم تجزئةً لا يُشتقّ منها الكوكي. والمعرّف ٣٢ بايتاً عشوائية،
+ * فلا يُخمَّن ولا تنفع فيه جداول محسوبة — ولا حاجة إلى ملح.
+ *
+ * وأثرُ النشر: الجلسات القائمة تصير غير مقروءة مرّةً واحدة، فيعود أصحابها
+ * إلى المركز ويدخلون بلا كلمة مرور — جلسةُ المركز قائمة. وعمرُها خمس عشرة
+ * دقيقة على أبعد تقدير أصلاً.
+ */
+export async function sessionKeyFor(sid) {
+  return `sess:${await sha256Hex(sid)}`;
+}
+
+export async function userIndexKeyFor(sub, sid) {
+  return `usr:${sub}:${await sha256Hex(sid)}`;
+}
+
+/** تجزئة SHA-256 بالنظام السداسي عشري — لِما يُرسل بدل السرّ نفسه. */
+export async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /** فكّ ترميز base64url إلى بايتات. */

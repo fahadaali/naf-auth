@@ -55,7 +55,24 @@ test('safeNext يردّ الشرطة العكسية إلى الجذر', () => {
 });
 
 test('safeNext يردّ محارف التحكّم إلى الجذر', () => {
-  for (const path of ['/\\tevil', '/\\nevil', '/\\revil', '/a\\u0000b', '/x\\u007F']) {
+  /* محرفُ تحكّمٍ حقيقي، لا نصُّه.
+     كان هنا `'/\\tevil'` — وهو نصٌّ فيه شرطةٌ عكسية وحرفُ `t`، لا جدولة.
+     فيردّه فحصُ الشرطة العكسية في `looksSafe` قبل أن يبلغ فحصَ محارف
+     التحكّم الذي يليه، فيمرّ الاختبار والحارسُ لم يُنفَّذ قطّ.
+     والبناء بـ`String.fromCharCode` يُبقي المقصود ظاهراً في السطر بدل أن
+     يكون محرفاً غير مرئي يحذفه أول محرّر يمرّ عليه. */
+  const ctrl = (code) => String.fromCharCode(code);
+  const paths = [
+    `/${ctrl(9)}evil`, // جدولة
+    `/${ctrl(10)}evil`, // سطر جديد
+    `/${ctrl(13)}evil`, // إرجاع
+    `/a${ctrl(0)}b`, // NUL
+    `/x${ctrl(127)}`, // DEL
+  ];
+
+  for (const path of paths) {
+    // يثبت أن الفحص المقصود هو الذي ردّه: لا شرطة عكسية فيه تسبقه إليه.
+    assert.ok(!path.includes('\\'), `المدخل يجب أن يخلو من الشرطة العكسية: ${JSON.stringify(path)}`);
     assert.equal(safeNext(path), '/');
   }
 });
@@ -91,6 +108,23 @@ test('readCookie يقرأ الاسم المطلوب دون ما يشابهه', (
 
 test('readCookie يعيد null بلا ترويسة', () => {
   assert.equal(readCookie({ headers: { get: () => null } }, 'naf_sid'), null);
+});
+
+test('readCookie يتخطّى نسخةً تالفة بالاسم نفسه ويكمل إلى الصحيحة', () => {
+  /* المتصفّح يرسل نسخةً لكل `Domain` و`Path` كتبتها، ولا يقول أيُّها من
+     أين. فنسخةٌ قديمة تعذّر فكّ ترميزها كانت تُنهي البحث وتعيد `null` —
+     فيُخرَج صاحبُ جلسةٍ صحيحة، ولا يملك إصلاحها إلا بمسح كوكيّات الموقع. */
+  const request = {
+    headers: { get: () => 'naf_sid=%E0%A4%A; naf_sid=xyz' },
+  };
+  assert.equal(readCookie(request, 'naf_sid'), 'xyz');
+});
+
+test('readCookie يعيد null إن كانت كل النسخ تالفة', () => {
+  const request = {
+    headers: { get: () => 'naf_sid=%E0%A4%A; naf_sid=%ZZ' },
+  };
+  assert.equal(readCookie(request, 'naf_sid'), null);
 });
 
 test('timingSafeEqual يطابق المتساوي ويرفض ما عداه', () => {

@@ -1,8 +1,18 @@
 // naf-auth — مسار الاستقبال
 // يستقبل رمز العبور، يبادله خادماً لخادم، ينشئ العضو، ثم يفتح جلسة المنصة.
 
-import { AuthError, newSessionId, safeNext, sessionCookie } from './safe.js';
-import { deniedResponse, startLogin } from './middleware.js';
+import {
+  AuthError,
+  newSessionId,
+  readCookie,
+  sessionKeyFor,
+  userIndexKeyFor,
+  safeNext,
+  sessionCookie,
+  sha256Hex,
+  timingSafeEqual,
+} from './safe.js';
+import { bindCookieName, deniedResponse, startLogin } from './middleware.js';
 import { upsertMember } from './store.js';
 import { verifyToken } from './verify.js';
 
@@ -18,6 +28,16 @@ import { verifyToken } from './verify.js';
 function sessionTtl(exp) {
   return Math.max(60, exp - Math.floor(Date.now() / 1000));
 }
+
+/**
+ * مهلة كل نداء إلى المركز.
+ *
+ * بلا مهلة يرث النداءُ مهلةَ الـWorker كلها: مركزٌ يقبل الاتصال ولا يردّ
+ * يُعلّق الدخول حتى ينفد وقت الطلب، فيصل صاحبَه خطأُ منصّة لا خطأُ دخول —
+ * وقد تمّت مصادقتُه فعلاً. والمركز نفسه يضع ثلاث ثوانٍ على نداء الخروج
+ * الخلفي، وهذه الجهة أولى بها.
+ */
+const CENTER_TIMEOUT_MS = 5000;
 
 /**
  * مبادلة رمز العبور بالرمز الموقّع — خادماً لخادم.
@@ -36,16 +56,23 @@ async function exchangeCode(code, state, env, config) {
   const secret = env[config.secretBinding];
   if (!secret) throw new AuthError('secret_missing');
 
-  const res = await fetch(`${config.issuer}/api/token`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({
-      platformId: config.platformId,
-      secret,
-      code,
-      state,
-    }),
-  });
+  let res;
+  try {
+    res = await fetch(`${config.issuer}/api/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({
+        platformId: config.platformId,
+        secret,
+        code,
+        state,
+      }),
+      signal: AbortSignal.timeout(CENTER_TIMEOUT_MS),
+    });
+  } catch {
+    // انقطاعٌ أو نفادُ مهلة — ولا يُرفق سببٌ تقني، فالرمز يكفي للسجلّ.
+    throw new AuthError('exchange_unreachable');
+  }
 
   if (!res.ok) {
     // نصّ الاستجابة لا يُرفَق: قد يعيد المركز ما أُرسل إليه.
@@ -59,7 +86,13 @@ async function exchangeCode(code, state, env, config) {
 
   // الوجهة تعود في ردّ المبادلة. وتُنقّى هنا مرة أخرى: أن المركز فحصها لا
   // يُغني عن فحصنا، فنحن من يضعها في ترويسة `Location`.
-  return { token: body.token, next: safeNext(body.next) };
+  return {
+    token: body.token,
+    next: safeNext(body.next),
+    // تجزئةُ سرّ الربط كما خزّنها المركز مع الرمز. `null` تعني أن الرمز
+    // صدر بلا ربط — انظر `checkBinding`.
+    bind: typeof body.bind === 'string' && body.bind ? body.bind : null,
+  };
 }
 
 /**
@@ -82,6 +115,46 @@ async function reportRoleOnLogin(env, config, claims, member) {
   } catch (err) {
     if (config.onError) config.onError('role_report_failed', err);
   }
+}
+
+/**
+ * مطابقة الربط بالمتصفّح — ثلاث حالات لا رابعة، وكلُّها تنتهي.
+ *
+ * ١) المركز أعاد تجزئةً (`bind` نصّ):
+ *    الرمز صدر مربوطاً، فيجب أن يحمل هذا المتصفّح سرَّه. تُطابَق تجزئةُ
+ *    الكوكي بما عاد، مطابقةً ثابتة الزمن. وغيابُ الكوكي أو اختلافُه ردٌّ —
+ *    وهو متصفّح الضحية في هجمة التثبيت.
+ *
+ * ٢) لا تجزئة عادت، وعندنا كوكي:
+ *    أرسلنا ربطاً ولم يُعِده المركز — أي مركزٌ أقدم من هذه الحزمة. يُقبل
+ *    الدخول كما كان قبل الربط، فلا تنكسر منصةٌ سبقت المركزَ في الترقية.
+ *
+ * ٣) لا تجزئة ولا كوكي:
+ *    دخولٌ بدأ من شبكة المركز — بطاقةٌ تقصد `‎/go/:id` مباشرةً، فلم يمرّ
+ *    بـ`startLogin` ولم يُولَّد له سرّ. فيُعاد البدء من هنا: `startLogin`
+ *    يضع الكوكي ويرسل التجزئة، وجلسةُ المركز قائمة فيصدر رمزٌ جديد فوراً
+ *    ويعود مربوطاً. ولفةٌ واحدة لا تتكرّر — لأن الرمز الجديد يحمل تجزئة،
+ *    فالعودة تقع في الحالة (١) لا في (٣).
+ *
+ * ولا تلتقي الحالتان (٢) و(٣) في لفّةٍ لا تنتهي: (٣) تشترط غياب الكوكي،
+ * و`startLogin` يضعه — فالدورة الثانية تجد كوكياً حتماً.
+ */
+async function checkBinding(request, config, bind) {
+  const cookieName = bindCookieName(config);
+  const nonce = readCookie(request, cookieName);
+
+  if (bind) {
+    if (!nonce) return 'missing';
+    const matches = timingSafeEqual(await sha256Hex(nonce), bind);
+    return matches ? 'ok' : 'mismatch';
+  }
+
+  return nonce ? 'legacy_center' : 'unbound';
+}
+
+/** كوكي الربط يُمحى بعد استعماله — لا يُترك حتى ينتهي عمره. */
+function clearBindCookie(config) {
+  return `${bindCookieName(config)}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`;
 }
 
 /**
@@ -128,7 +201,45 @@ export async function handleCallback(request, env, config) {
   if (!state) return deniedResponse(request, config, config.reasons.badState);
 
   try {
-    const { token, next: exchangedNext } = await exchangeCode(code, state, env, config);
+    const { token, next: exchangedNext, bind } = await exchangeCode(code, state, env, config);
+
+    /* الربط يُفحص قبل أي أثر يُترك: قبل التحقق من الرمز وقبل إنشاء العضو
+       وقبل فتح الجلسة. فمحاولةُ تثبيتٍ لا تُنشئ صفّاً ولا تكتب مفتاحاً. */
+    const binding = await checkBinding(request, config, bind);
+
+    if (binding === 'missing' || binding === 'mismatch') {
+      if (config.onError) config.onError(`bind_${binding}`, new AuthError(`bind_${binding}`));
+      const denied = deniedResponse(request, config, config.reasons.badState);
+      // ويُمحى الكوكي: سرٌّ أُخفق في مطابقته لا يُعاد استعماله.
+      denied.headers.append('set-cookie', clearBindCookie(config));
+      return denied;
+    }
+
+    if (binding === 'unbound') {
+      /* دخولٌ بدأ من شبكة المركز. يُعاد البدء ليُولَّد له سرّ ربط — لفّةٌ
+         واحدة، وجلسةُ المركز قائمة فلا يرى صاحبُها إلا تحويلتين.
+
+         والبدء يقع من **الوجهة المقصودة** لا من مسار الاستقبال:
+         `startLogin` يشتقّ `next` من عنوان الطلب الذي يصله، وعنوانُ هذا
+         الطلب هو `‎/auth/callback?code=…` برمزٍ استُهلك توّاً. فلو مرّرناه
+         كما هو لعادت الوجهة إليه، فيُحوَّل صاحبُه بعد دخولٍ تمّ إلى مسار
+         استقبالٍ برمزٍ ميّت — فيفشل ويقرأ رفضاً بلا سبب.
+
+         فيُبنى طلبٌ عنوانُه الوجهة: ما وصل في `next` إن كان سليماً، وإلا
+         الجذر. ومسارُ الاستقبال ليس وجهةً في أي حال — هو محطّة لا صفحة. */
+      const intended = safeNext(url.searchParams.get('next'));
+      const restart = new URL(request.url);
+      restart.search = '';
+      if (intended !== '/' && !intended.startsWith(url.pathname)) {
+        const parsed = new URL(intended, url.origin);
+        restart.pathname = parsed.pathname;
+        restart.search = parsed.search;
+      } else {
+        restart.pathname = '/';
+      }
+
+      return startLogin(new Request(restart, request), env, config);
+    }
 
     // التحقق الكامل: التوقيع و `iss` و `aud` و `exp` معاً.
     const claims = await verifyToken(token, env, config);
@@ -160,15 +271,19 @@ export async function handleCallback(request, env, config) {
        لا مرّة في كل طلب.
 
        وتعذّره لا يُسقط الدخول: العضو دخل، والناقص سطرٌ في لوحةٍ لا يراها.
-       فيُسجَّل ويمضي. */
-    await reportRoleOnLogin(env, config, claims, member);
+       فيُسجَّل ويمضي.
+
+       وموضعه بعد كتابة الجلسة لا قبلها: هو تبليغٌ للعرض وحده، وتقديمُه على
+       ما يُثبت الدخول يجعل تعثّرَ لوحةٍ لا يراها المستخدم يكلّفه دخوله —
+       فبين التبليغ وكتابة الجلسة تقع مهلةُ الشبكة كاملةً، وقد تنفد مهلةُ
+       الـWorker قبل أن يُكتب شيء. فيُكتب أولاً ما لا يُستغنى عنه. */
 
     // جلسة بمعرّف عشوائي، تحمل الرمز الموقّع نفسه: الوسيط يعيد التحقق منه
     // في كل طلب محمي، فلا تكون الجلسة أطول عمراً من الرمز الذي أنشأها.
     const ttl = sessionTtl(claims.exp);
     const sid = newSessionId();
     await config.kv(env).put(
-      `sess:${sid}`,
+      await sessionKeyFor(sid),
       JSON.stringify({ sub: claims.sub, token, exp: claims.exp }),
       { expirationTtl: ttl },
     );
@@ -179,7 +294,10 @@ export async function handleCallback(request, env, config) {
        فلانٍ في هذه المنصة ليمحوها، ولا سبيل إلى ذلك بلا دليل.
        فيُكتب مفتاحٌ فارغ اسمه يحمل الطرفين، وعمره عمر الجلسة نفسه فيذهب
        معها ولا يتراكم. */
-    await config.kv(env).put(`usr:${claims.sub}:${sid}`, '1', { expirationTtl: ttl });
+    await config.kv(env).put(await userIndexKeyFor(claims.sub, sid), '1', { expirationTtl: ttl });
+
+    // الجلسة صارت ثابتة. والتبليغ بعدها — انظر شرحه فوق.
+    await reportRoleOnLogin(env, config, claims, member);
 
     // الوجهة تصل في الرابط وتعود في ردّ المبادلة. ما في الرابط أولى لأنه
     // ما طلبه هذا المتصفّح، وردّ المبادلة احتياطُه.
@@ -192,14 +310,13 @@ export async function handleCallback(request, env, config) {
        لأن القيمة تعود من المركز كذلك. */
     const next = resolved === url.pathname ? '/' : resolved;
 
-    return new Response(null, {
-      status: 302,
-      headers: {
-        location: next,
-        'set-cookie': sessionCookie(config.cookieName, sid, ttl),
-        'cache-control': 'no-store',
-      },
-    });
+    /* كوكيّان في ردٍّ واحد: الجلسة تُفتح، وسرُّ الربط يُمحى — أدّى عمله.
+       و`Headers` لا كائنٌ عادي: مفتاح `set-cookie` لا يتكرّر في كائن. */
+    const headers = new Headers({ location: next, 'cache-control': 'no-store' });
+    headers.append('set-cookie', sessionCookie(config.cookieName, sid, ttl));
+    headers.append('set-cookie', clearBindCookie(config));
+
+    return new Response(null, { status: 302, headers });
   } catch (err) {
     const errorCode = err instanceof AuthError ? err.code : 'callback_failed';
     if (config.onError) config.onError(errorCode, err);
@@ -254,11 +371,17 @@ export async function reportAccessChange(env, config, { email, state, reason, ro
      لوحة المركز — قراءةً لا حكماً، ولا يُقرأ في أي قرار دخول. */
   if (hasRole) body.role = role.trim();
 
-  const res = await fetch(`${config.issuer}/api/internal/access`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(`${config.issuer}/api/internal/access`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(CENTER_TIMEOUT_MS),
+    });
+  } catch {
+    throw new AuthError('access_report_unreachable');
+  }
 
   if (!res.ok) throw new AuthError('access_report_failed', `تعذّر تبليغ المركز (${res.status})`);
   return true;

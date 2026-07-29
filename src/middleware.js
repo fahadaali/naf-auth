@@ -1,9 +1,18 @@
 // naf-auth — الوسيط
 // يحمي كل مسارات المنصة، ويحوّل غير المسجَّل إلى المركز، ويحقن المستخدم في السياق.
 
-import { AuthError, readCookie, safeNext } from './safe.js';
+import {
+  AuthError,
+  bindCookie,
+  randomToken,
+  readCookie,
+  safeNext,
+  sessionKeyFor,
+  sha256Hex,
+  userIndexKeyFor,
+} from './safe.js';
 import { getMember } from './store.js';
-import { verifyToken } from './verify.js';
+import { isTokenError, verifyToken } from './verify.js';
 
 /**
  * أي مسار جديد محمي افتراضياً.
@@ -102,17 +111,36 @@ function loginUrl(request, config) {
 }
 
 /**
- * بدء الدخول: تحويلة إلى باب المركز.
+ * بدء الدخول: تحويلة إلى باب المركز، ومعها ربطٌ بهذا المتصفّح.
  *
- * ولا حالة عابرة تُولَّد هنا: `‎/go/:id` يتجاهل أي `state` يصله ويولّد
- * واحدة من عنده، فحالةٌ من طرفنا لا تعود إلينا أبداً — ومطابقتها عند
- * الاستقبال تفشل حتماً فتُسقط كل دخول.
+ * `state` يولّده المركز ويطابقه عند المبادلة — وهو يثبت أن الرمز والحالة
+ * جاءا معاً من المركز، **ولا يثبت شيئاً عن المتصفّح الواصل**: الاثنان
+ * يسافران في التحويلة نفسها، فمن ملك أحدهما ملك الآخر.
  *
- * والوجهة تُحمل في الرابط: المركز يعلّقها على مسار الاستقبال عند التحويل،
- * ويعيدها ثانيةً في ردّ المبادلة.
+ * وهذه هي ثغرة تثبيت الجلسة: يفتح المهاجم `‎{issuer}/go/:id` في متصفّحه،
+ * يلتقط `‎…/auth/callback?code=C&state=S` ولا يتبعه، ثم يدفع الضحية إليه
+ * خلال الستين ثانية. فتتمّ المبادلة وتُفتح جلسةٌ بهوية **المهاجم** في
+ * متصفّح **الضحية** — فترفع ملفاتها وتكتب مسوّداتها في حسابه، ويقرؤها
+ * بدخوله العادي. و`SameSite=Lax` لا تمنع شيئاً: الوصول تنقّلٌ علويّ بـ`GET`.
+ *
+ * فيُولَّد هنا سرٌّ عشوائي يبقى في كوكي على هذا المتصفّح وحده، ولا يسافر:
+ * الذي يسافر تجزئتُه. والمركز يخزّنها مع رمز العبور ويعيدها في ردّ
+ * المبادلة، فيطابق مسارُ الاستقبال تجزئةَ الكوكي بما عاد. ومتصفّحُ الضحية
+ * لا كوكي فيه، فتُردّ المحاولة.
  */
 export async function startLogin(request, env, config) {
-  return redirect(loginUrl(request, config));
+  const nonce = randomToken(32);
+  const target = new URL(loginUrl(request, config));
+  target.searchParams.set('bind', await sha256Hex(nonce));
+
+  return redirect(target.toString(), {
+    'set-cookie': bindCookie(bindCookieName(config), nonce),
+  });
+}
+
+/** اسم كوكي الربط — مشتقٌّ من اسم كوكي الجلسة فلا يصطدم بمنصةٍ أخرى. */
+export function bindCookieName(config) {
+  return `${config.cookieName}_bind`;
 }
 
 /**
@@ -130,6 +158,31 @@ function unauthorizedResponse(request, config) {
 }
 
 /**
+ * ردّ «تعذّر التحقق الآن» — والجلسة باقية.
+ *
+ * يُستعمل حين يعجز المتحقّق لا حين يبطل الرمز: المركز متعثّر أو الشبكة
+ * منقطعة. و٥٠٣ لا ٤٠١ لأن الأول يقول «أعِد المحاولة» والثاني يقول «سجّل
+ * الدخول» — والثاني كذبٌ هنا يدفع صاحبه إلى بابٍ لا يفتح.
+ *
+ * و`Retry-After` ثانيتان: عطلُ الجلب لحظيّ في الغالب، والمخبأ يعود بأول
+ * جلبٍ ناجح.
+ *
+ * والردّ واحدٌ للتنقّل ولنداء `fetch` معاً — بخلاف بقية ردود هذا الملف:
+ * ليس في الحالين وجهةٌ تنفع. التحويلة إلى المركز تُرسل صاحبها إلى المضيف
+ * المتعثّر نفسه، فالصدق أن يُقال «أعِد المحاولة» لا أن يُدار في حلقة.
+ */
+function unavailableResponse() {
+  return new Response(JSON.stringify({ ok: false, error: 'auth_unavailable' }), {
+    status: 503,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'retry-after': '2',
+    },
+  });
+}
+
+/**
  * جوهر الوسيط. يعيد إمّا `Response` جاهزاً (تحويل أو رفض)، وإمّا `{ user }`.
  * لا يكتب في الاستجابة بنفسه ليصلح لـ Pages Functions ولـ Worker على حدّ سواء.
  */
@@ -138,20 +191,27 @@ export async function authenticate(request, env, config) {
 
   if (isPublicPath(url.pathname, config)) return { public: true };
 
-  const noSession = () =>
+  /* التنقّل يمرّ بـ`startLogin` لا بتحويلةٍ مباشرة: هو الذي يولّد سرّ الربط
+     ويضعه في كوكي ويرسل تجزئته. وهذا هو المدخل الغالب — الرمز يعيش خمس عشرة
+     دقيقة، فكل لوحةٍ مفتوحة أطول من ذلك تمرّ من هنا.
+
+     أمّا نداء `fetch` فيأخذ ٤٠١ ومعه عنوان الباب كما كان: لا كوكي يُوضع في
+     ردٍّ لا يتنقّل به المتصفّح، والتنقّل الذي يليه يبلغ المركز بلا ربط —
+     فيلتقطه مسارُ الاستقبال ويعيد بدأه مربوطاً. */
+  const noSession = async () =>
     wantsDocument(request, url, config)
-      ? redirect(loginUrl(request, config))
+      ? startLogin(request, env, config)
       : unauthorizedResponse(request, config);
 
   const sid = readCookie(request, config.cookieName);
-  if (!sid) return { response: noSession() };
+  if (!sid) return { response: await noSession() };
 
   const kv = config.kv(env);
-  const session = await kv.get(`sess:${sid}`, 'json');
+  const session = await kv.get(await sessionKeyFor(sid), 'json');
 
   // الجلسة المنتهية تعود إلى المركز ولا تجدّد نفسها، وإلا بقي الموقوف
   // مركزياً يدخل حتى انتهاء كوكيه.
-  if (!session || !session.sub || !session.token) return { response: noSession() };
+  if (!session || !session.sub || !session.token) return { response: await noSession() };
 
   /* ═══ التحقق في كل طلب محمي، لا عند الاستقبال وحده ═══
      الرمز يعيش خمس عشرة دقيقة، وهذا الفحص هو ما يجعل لقِصَره معنى: بلا
@@ -167,11 +227,25 @@ export async function authenticate(request, env, config) {
     if (config.onError) {
       config.onError(err instanceof AuthError ? err.code : 'session_verify_failed', err);
     }
-    // رمزٌ لم يعد صالحاً: تُمسح الجلسة فلا تُقرأ ثانيةً، ويعود الطلب إلى
-    // المركز ليصدر رمزاً جديداً إن كان صاحبه لا يزال مخوَّلاً.
-    await kv.delete(`sess:${sid}`);
-    await kv.delete(`usr:${session.sub}:${sid}`);
-    return { response: noSession() };
+
+    /* ═══ «الرمز باطل» ليس «عجزتُ عن الفحص» ═══
+
+       الفرع الأول حكمٌ على الرمز: تُمسح الجلسة فلا تُقرأ ثانيةً، ويعود
+       الطلب إلى المركز ليصدر رمزاً جديداً إن كان صاحبه لا يزال مخوَّلاً.
+
+       والثاني حكمٌ على الشبكة لا على صاحبها: `jwks_unavailable` يقع حين
+       يتعثّر المركز أو تنقطع الشبكة أو يُردّ الجلبُ بحدّ معدّل. ومحوُ
+       الجلسة عندئذ يعاقب عضواً لم يُخطئ، ويرسله إلى المضيف المتعثّر نفسه
+       ليدخل من جديد — فلا يعود بجلسة. فتُترك جلسته كما هي، ويُردّ ٥٠٣:
+       الطلب التالي بعد تعافي المركز يمرّ بلا دخولٍ جديد.
+
+       والمخبأ يعيش خمس دقائق، فنافذةُ الاعتماد على الشبكة تتكرّر كل خمس
+       دقائق لكل منصة — وهي أكثر من أن تُترك لحكمٍ خاطئ. */
+    if (!isTokenError(err)) return { response: unavailableResponse() };
+
+    await kv.delete(await sessionKeyFor(sid));
+    await kv.delete(await userIndexKeyFor(session.sub, sid));
+    return { response: await noSession() };
   }
 
   const member = await getMember(env, config, session.sub);

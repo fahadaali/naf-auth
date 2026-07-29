@@ -266,3 +266,104 @@ test('مُصدِر مختلف فعلاً لا يزال يُرفض رغم الت�
     restore();
   }
 });
+
+// ───────── إعادة الجلب عند kid مجهول: تعمل، ولا تُضخِّم ─────────
+
+test('kid مجهول يُجبر جلباً واحداً — فالتدوير لا يعطّل المنصة', async () => {
+  const oldKey = await makeKey('k1');
+  const newKey = await makeKey('k2');
+  // المخبأ يحمل المفتاح القديم وحده، كما هي الحال لحظةَ التدوير.
+  const s = setup({ current: [newKey.jwk] });
+  try {
+    await s.kv.put(`jwks:${ISSUER}`, JSON.stringify({ keys: [oldKey.jwk] }));
+
+    const now = Math.floor(Date.now() / 1000);
+    const token = await sign(newKey.pair.privateKey, { alg: 'RS256', kid: 'k2' }, {
+      sub: 'u1', iss: ISSUER, aud: PLATFORM, iat: now, exp: now + 900,
+    });
+
+    const claims = await verifyToken(token, {}, s.config);
+    assert.equal(claims.sub, 'u1', 'الرمز الموقّع بالمفتاح الجديد يمرّ');
+    assert.equal(s.calls.jwks, 1, 'جلبٌ واحد لا أكثر');
+  } finally {
+    s.restore();
+  }
+});
+
+test('سيلٌ من kid مجهول لا يُجبر إلا جلباً واحداً — لا تضخيم على المركز', async () => {
+  /* `‎/auth/backchannel-logout` مسارٌ عامّ بلا مصادقة، ورمزٌ مركَّب بـkid
+     عشوائي يبلغ موضعَ الجلب **قبل** التحقق من التوقيع. فبلا سقفٍ يصير كلُّ
+     طلبٍ مزوَّر جلباً شبكياً إلى المركز وكتابةً في KV. */
+  const key = await makeKey('k1');
+  const s = setup({ current: [key.jwk] });
+  try {
+    await s.kv.put(`jwks:${ISSUER}`, JSON.stringify({ keys: [key.jwk] }));
+
+    const now = Math.floor(Date.now() / 1000);
+    for (let i = 0; i < 25; i++) {
+      const forged = await sign(key.pair.privateKey, { alg: 'RS256', kid: `x${i}` }, {
+        sub: 'u1', iss: ISSUER, aud: PLATFORM, iat: now, exp: now + 900,
+      });
+      await assert.rejects(() => verifyToken(forged, {}, s.config), /unknown_kid/);
+    }
+
+    assert.equal(s.calls.jwks, 1, `٢٥ طلباً مزوَّراً أنتجت ${s.calls.jwks} جلباً — يجب أن يكون واحداً`);
+  } finally {
+    s.restore();
+  }
+});
+
+// ───────── مُصدِرٌ سابق: يُقبل في التحقق وحده ─────────
+
+test('AUTH_ISSUER_PREVIOUS يجعل رموز المُصدِر القديم تمرّ أثناء النقل', async () => {
+  const key = await makeKey('k1');
+  const s = setup({ current: [key.jwk] });
+  try {
+    const OLD = 'https://naf-id.pages.dev';
+    const config = { ...s.config, issuer: 'https://id.naf.sa', previousIssuer: OLD };
+
+    const now = Math.floor(Date.now() / 1000);
+    const token = await sign(key.pair.privateKey, { alg: 'RS256', kid: 'k1' }, {
+      sub: 'u1', iss: OLD, aud: PLATFORM, iat: now, exp: now + 900,
+    });
+
+    const claims = await verifyToken(token, {}, config);
+    assert.equal(claims.iss, OLD, 'رمزُ المُصدِر القديم يمرّ في مدّة النقل');
+  } finally {
+    s.restore();
+  }
+});
+
+test('ومُصدِرٌ ثالث لا يمرّ ولو ضُبط السابق', async () => {
+  const key = await makeKey('k1');
+  const s = setup({ current: [key.jwk] });
+  try {
+    const config = {
+      ...s.config,
+      issuer: 'https://id.naf.sa',
+      previousIssuer: 'https://naf-id.pages.dev',
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const forged = await sign(key.pair.privateKey, { alg: 'RS256', kid: 'k1' }, {
+      sub: 'u1', iss: 'https://evil.example', aud: PLATFORM, iat: now, exp: now + 900,
+    });
+    await assert.rejects(() => verifyToken(forged, {}, config), /bad_issuer/);
+  } finally {
+    s.restore();
+  }
+});
+
+test('وبلا ضبطِ السابق يبقى المُصدِر واحداً', async () => {
+  const key = await makeKey('k1');
+  const s = setup({ current: [key.jwk] });
+  try {
+    const config = { ...s.config, issuer: 'https://id.naf.sa' };
+    const now = Math.floor(Date.now() / 1000);
+    const old = await sign(key.pair.privateKey, { alg: 'RS256', kid: 'k1' }, {
+      sub: 'u1', iss: 'https://naf-id.pages.dev', aud: PLATFORM, iat: now, exp: now + 900,
+    });
+    await assert.rejects(() => verifyToken(old, {}, config), /bad_issuer/);
+  } finally {
+    s.restore();
+  }
+});

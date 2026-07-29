@@ -18,6 +18,53 @@ const CLOCK_SKEW_SECONDS = 60;
 /** الخوارزمية الوحيدة المقبولة. أي قيمة أخرى ترفض قبل أي عمل تعمية. */
 const ALG = 'RS256';
 
+/**
+ * مهلة جلب `JWKS`.
+ *
+ * بلا مهلة يرث الطلبُ مهلةَ المنصة كلها: مركزٌ يقبل الاتصال ولا يردّ يُعلّق
+ * كل طلب محميّ حتى ينفد وقت الـWorker، فيصل صاحبَه خطأ منصّة لا خطأ دخول.
+ * والمركز نفسه يضع ثلاث ثوانٍ على نداء الخروج الخلفي — وهذه الجهة أولى بها،
+ * فهي في المسار الحرج لكل طلب لا في إشعارٍ لاحق.
+ */
+const JWKS_TIMEOUT_MS = 3000;
+
+/**
+ * مهلة بين إجبارَي جلبٍ متتاليين عند `kid` مجهول.
+ *
+ * ستون ثانية: أقلُّ ما يقبله `KV` عمراً، وهو كافٍ — التدوير حدثٌ واحد لا
+ * سيل، فأوّلُ طلبٍ بعده يجلب المفتاح الجديد ويخبّئه لمن يليه.
+ */
+const FORCE_COOLDOWN_SECONDS = 60;
+
+/**
+ * أخطاء الرمز نفسه — يقابلها أخطاءُ عجزِ المتحقّق (`jwks_unavailable`
+ * و`jwks_malformed` وما ليس `AuthError` أصلاً).
+ *
+ * والفرق ليس تصنيفاً: الوسيط يمحو الجلسة على الأولى ولا يمحوها على الثانية.
+ * «الرمز باطل» حكمٌ على الرمز، و«عجزتُ عن الفحص» حكمٌ على الشبكة — ومحوُ
+ * جلسةٍ صحيحة لأن المركز تعثّر لحظةً يُخرج أعضاءً لم يُخطئوا شيئاً.
+ */
+export const TOKEN_ERRORS = new Set([
+  'token_malformed',
+  'bad_alg',
+  'missing_kid',
+  'unknown_kid',
+  'bad_signature',
+  'bad_issuer',
+  'bad_audience',
+  'missing_exp',
+  'token_expired',
+  'token_not_yet_valid',
+  'token_from_future',
+  'missing_sub',
+  'wrong_token_type',
+]);
+
+/** هل هذا خطأُ رمزٍ باطل، أم عجزٌ عن التحقق؟ */
+export function isTokenError(err) {
+  return err instanceof AuthError && TOKEN_ERRORS.has(err.code);
+}
+
 function jwksUrl(issuer) {
   return `${normaliseIssuer(issuer)}/.well-known/jwks.json`;
 }
@@ -35,15 +82,34 @@ async function loadJwks(env, config, force = false) {
     if (cached && Array.isArray(cached.keys)) return cached;
   }
 
-  const res = await fetch(jwksUrl(config.issuer), {
-    headers: { accept: 'application/json' },
-  });
+  let res;
+  try {
+    res = await fetch(jwksUrl(config.issuer), {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(JWKS_TIMEOUT_MS),
+    });
+  } catch {
+    // انقطاعُ شبكةٍ أو نفادُ مهلة — عجزٌ عن التحقق لا رمزٌ باطل.
+    throw new AuthError('jwks_unavailable');
+  }
   if (!res.ok) throw new AuthError('jwks_unavailable');
 
-  const jwks = await res.json();
+  let jwks;
+  try {
+    jwks = await res.json();
+  } catch {
+    throw new AuthError('jwks_malformed');
+  }
   if (!jwks || !Array.isArray(jwks.keys)) throw new AuthError('jwks_malformed');
 
-  await kv.put(cacheKey, JSON.stringify(jwks), { expirationTtl: JWKS_TTL_SECONDS });
+  /* تعذّرُ الكتابة لا يُسقط تحقّقاً نجح.
+     المخبأ تسريعٌ لا شرط: الكتابة على مفتاح واحد ساخن قد تُردّ بحدّ معدّل
+     في KV، ورميُها من هنا يُبطل رمزاً سليماً بيد صاحبه — ويمحو جلسته. */
+  try {
+    await kv.put(cacheKey, JSON.stringify(jwks), { expirationTtl: JWKS_TTL_SECONDS });
+  } catch {
+    /* يمضي بلا مخبأ: الطلب التالي يجلب من جديد. */
+  }
   return jwks;
 }
 
@@ -126,11 +192,35 @@ async function verifySigned(token, env, config, expectedPurpose) {
   let jwks = await loadJwks(env, config);
   let jwk = findKey(jwks, header.kid);
 
-  // الاحتراز الخامس في §١٠: معرّف مفتاح غير معروف يعيد الجلب فوراً،
-  // وإلا تعطّلت المنصة ساعة كاملة عند كل تدوير مفاتيح.
+  /* الاحتراز الخامس في §١٠: معرّف مفتاح غير معروف يعيد الجلب فوراً، وإلا
+     تعطّلت المنصة عند كل تدوير مفاتيح حتى ينقضي المخبأ.
+
+     ═══ لكنّ إعادة الجلب لا تُترك بلا سقف ═══
+
+     `‎/auth/backchannel-logout` مسارٌ عامّ بلا مصادقة — وهو كذلك بالضرورة،
+     فالمنادي خادمُ المركز لا متصفّح. ورمزٌ مركَّب بـ`kid` عشوائي يجتاز
+     فحصَي `alg` و`kid` ويبلغ هذا السطر **قبل التحقق من التوقيع**: فحصُ
+     التوقيع يحتاج المفتاح، والمفتاح هو ما يُجلب. فكلُّ طلبٍ مزوَّر كان
+     يُجبر جلباً شبكياً إلى المركز وكتابةً في `KV` — بلا حدّ، ومن أي أحد.
+     فتصير المنصةُ مضخِّمَ حِملٍ على مركزها.
+
+     فيُقيَّد الإجبار بمهلةٍ قصيرة: أوّلُ `kid` مجهول يجلب، وما يليه خلال
+     المهلة يُردّ بلا شبكة. والتدوير لا يتأثّر — هو حدثٌ واحد لا سيلٌ،
+     وأوّلُ طلبٍ بعده يجلب المفتاح الجديد ويخبّئه للبقية. */
   if (!jwk) {
-    jwks = await loadJwks(env, config, true);
-    jwk = findKey(jwks, header.kid);
+    const cooldownKey = `jwksforce:${config.issuer}`;
+    const kv = config.kv(env);
+    const cooling = await kv.get(cooldownKey);
+
+    if (!cooling) {
+      try {
+        await kv.put(cooldownKey, '1', { expirationTtl: FORCE_COOLDOWN_SECONDS });
+      } catch {
+        /* تعذّرُ كتابة المهلة لا يمنع الجلب — الحدّ تحسينٌ لا شرط. */
+      }
+      jwks = await loadJwks(env, config, true);
+      jwk = findKey(jwks, header.kid);
+    }
   }
   if (!jwk) throw new AuthError('unknown_kid');
 
@@ -138,9 +228,16 @@ async function verifySigned(token, env, config, expectedPurpose) {
   const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, signingInput);
   if (!valid) throw new AuthError('bad_signature');
 
-  // مقارنةٌ حرفية. و`config.issuer` وُحّدت صورتُه مرة واحدة عند بناء
-  // الإعداد، فما يُقارَن هنا هو `iss` كما وقّعه المركز بلا تطبيع.
-  if (payload.iss !== config.issuer) throw new AuthError('bad_issuer');
+  /* مقارنةٌ حرفية. و`config.issuer` وُحّدت صورتُه مرة واحدة عند بناء
+     الإعداد، فما يُقارَن هنا هو `iss` كما وقّعه المركز بلا تطبيع.
+
+     و`previousIssuer` يُقبل معه إن ضُبط — لمدّة نقل المركز إلى نطاق مخصّص
+     وحدها، وهي المدّة التي يصف README إجراءها. ولا يُبنى منه عنوان `JWKS`
+     ولا يُحوَّل إليه أحد: هو مقبولٌ في التحقق لا بابٌ ثانٍ. */
+  const issuerMatches =
+    payload.iss === config.issuer ||
+    (config.previousIssuer ? payload.iss === config.previousIssuer : false);
+  if (!issuerMatches) throw new AuthError('bad_issuer');
   if (!audienceMatches(payload.aud, config.platformId)) throw new AuthError('bad_audience');
 
   const now = Math.floor(Date.now() / 1000);

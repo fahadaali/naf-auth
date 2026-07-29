@@ -12,6 +12,10 @@ import { authenticate } from '../src/middleware.js';
 import { handleLogout, logoutTarget } from '../src/logout.js';
 import { reportAccessChange } from '../src/callback.js';
 import { fakeKV } from './keys.js';
+import { sha256Hex, sessionKeyFor, userIndexKeyFor } from '../src/safe.js';
+
+/* سرُّ ربط الدخول بالمتصفّح — تجزئتُه هي ما يعيده المركز في ردّ المبادلة. */
+const BIND_NONCE = 'bind-nonce-for-tests';
 
 const ISSUER = 'https://id.naf.example';
 const PLATFORM = 'naf-test';
@@ -45,7 +49,7 @@ test('الوجهة بعد الخروج هي المركز لا جذر المنص�
 
 test('تنقّلٌ للخروج: ٣٠٢ إلى المركز، والكوكي ممسوح، والجلسة محذوفة', async () => {
   const { kv, env, config } = setup();
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: 't', exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: 't', exp: 0 }));
 
   const response = await handleLogout(
     reqWith('/auth/logout', { cookie: 'naf_sid=s1', mode: 'navigate' }),
@@ -63,7 +67,7 @@ test('تنقّلٌ للخروج: ٣٠٢ إلى المركز، والكوكي م�
 
 test('نداء fetch للخروج: ٢٠٠ ومعه الوجهة نصّاً لا تحويلة', async () => {
   const { kv, env, config } = setup();
-  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: 't', exp: 0 }));
+  await kv.put(await sessionKeyFor('s1'), JSON.stringify({ sub: 'u1', token: 't', exp: 0 }));
 
   const response = await handleLogout(
     reqWith('/auth/logout', { cookie: 'naf_sid=s1', mode: 'cors', method: 'POST' }),
@@ -275,14 +279,15 @@ test('الدخول يبلّغ المركز بالصلاحية — بلا حال�
     const body = init.body ? JSON.parse(init.body) : null;
     calls.push({ url: href, body });
     if (href.endsWith('/.well-known/jwks.json')) return Response.json({ keys: [key.jwk] });
-    if (href.endsWith('/api/token')) return Response.json({ token, next: '/' });
+    if (href.endsWith('/api/token'))
+      return Response.json({ token, next: '/', bind: await sha256Hex(BIND_NONCE) });
     if (href.endsWith('/api/internal/access')) return Response.json({ ok: true });
     return new Response('not found', { status: 404 });
   };
 
   try {
     const res = await handleCallback(
-      reqWith('/auth/callback?code=c1&state=s1', { mode: 'navigate' }),
+      reqWith('/auth/callback?code=c1&state=s1', { mode: 'navigate', cookie: `naf_sid_bind=${BIND_NONCE}` }),
       env,
       config,
     );
@@ -335,7 +340,8 @@ test('تعذّر تبليغ الصلاحية لا يُسقط الدخول', asyn
   globalThis.fetch = async (u) => {
     const href = String(u);
     if (href.endsWith('/.well-known/jwks.json')) return Response.json({ keys: [key.jwk] });
-    if (href.endsWith('/api/token')) return Response.json({ token, next: '/' });
+    if (href.endsWith('/api/token'))
+      return Response.json({ token, next: '/', bind: await sha256Hex(BIND_NONCE) });
     // المركز يردّ خطأً على التبليغ
     if (href.endsWith('/api/internal/access')) return new Response('nope', { status: 500 });
     return new Response('not found', { status: 404 });
@@ -343,7 +349,7 @@ test('تعذّر تبليغ الصلاحية لا يُسقط الدخول', asyn
 
   try {
     const res = await handleCallback(
-      reqWith('/auth/callback?code=c1&state=s1', { mode: 'navigate' }),
+      reqWith('/auth/callback?code=c1&state=s1', { mode: 'navigate', cookie: `naf_sid_bind=${BIND_NONCE}` }),
       env,
       config,
     );
