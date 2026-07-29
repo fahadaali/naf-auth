@@ -3,7 +3,7 @@
 
 import { AuthError, readCookie, safeNext } from './safe.js';
 import { getMember } from './store.js';
-import { verifyToken } from './verify.js';
+import { isTokenError, verifyToken } from './verify.js';
 
 /**
  * أي مسار جديد محمي افتراضياً.
@@ -130,6 +130,31 @@ function unauthorizedResponse(request, config) {
 }
 
 /**
+ * ردّ «تعذّر التحقق الآن» — والجلسة باقية.
+ *
+ * يُستعمل حين يعجز المتحقّق لا حين يبطل الرمز: المركز متعثّر أو الشبكة
+ * منقطعة. و٥٠٣ لا ٤٠١ لأن الأول يقول «أعِد المحاولة» والثاني يقول «سجّل
+ * الدخول» — والثاني كذبٌ هنا يدفع صاحبه إلى بابٍ لا يفتح.
+ *
+ * و`Retry-After` ثانيتان: عطلُ الجلب لحظيّ في الغالب، والمخبأ يعود بأول
+ * جلبٍ ناجح.
+ *
+ * والردّ واحدٌ للتنقّل ولنداء `fetch` معاً — بخلاف بقية ردود هذا الملف:
+ * ليس في الحالين وجهةٌ تنفع. التحويلة إلى المركز تُرسل صاحبها إلى المضيف
+ * المتعثّر نفسه، فالصدق أن يُقال «أعِد المحاولة» لا أن يُدار في حلقة.
+ */
+function unavailableResponse() {
+  return new Response(JSON.stringify({ ok: false, error: 'auth_unavailable' }), {
+    status: 503,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'retry-after': '2',
+    },
+  });
+}
+
+/**
  * جوهر الوسيط. يعيد إمّا `Response` جاهزاً (تحويل أو رفض)، وإمّا `{ user }`.
  * لا يكتب في الاستجابة بنفسه ليصلح لـ Pages Functions ولـ Worker على حدّ سواء.
  */
@@ -167,8 +192,22 @@ export async function authenticate(request, env, config) {
     if (config.onError) {
       config.onError(err instanceof AuthError ? err.code : 'session_verify_failed', err);
     }
-    // رمزٌ لم يعد صالحاً: تُمسح الجلسة فلا تُقرأ ثانيةً، ويعود الطلب إلى
-    // المركز ليصدر رمزاً جديداً إن كان صاحبه لا يزال مخوَّلاً.
+
+    /* ═══ «الرمز باطل» ليس «عجزتُ عن الفحص» ═══
+
+       الفرع الأول حكمٌ على الرمز: تُمسح الجلسة فلا تُقرأ ثانيةً، ويعود
+       الطلب إلى المركز ليصدر رمزاً جديداً إن كان صاحبه لا يزال مخوَّلاً.
+
+       والثاني حكمٌ على الشبكة لا على صاحبها: `jwks_unavailable` يقع حين
+       يتعثّر المركز أو تنقطع الشبكة أو يُردّ الجلبُ بحدّ معدّل. ومحوُ
+       الجلسة عندئذ يعاقب عضواً لم يُخطئ، ويرسله إلى المضيف المتعثّر نفسه
+       ليدخل من جديد — فلا يعود بجلسة. فتُترك جلسته كما هي، ويُردّ ٥٠٣:
+       الطلب التالي بعد تعافي المركز يمرّ بلا دخولٍ جديد.
+
+       والمخبأ يعيش خمس دقائق، فنافذةُ الاعتماد على الشبكة تتكرّر كل خمس
+       دقائق لكل منصة — وهي أكثر من أن تُترك لحكمٍ خاطئ. */
+    if (!isTokenError(err)) return { response: unavailableResponse() };
+
     await kv.delete(`sess:${sid}`);
     await kv.delete(`usr:${session.sub}:${sid}`);
     return { response: noSession() };

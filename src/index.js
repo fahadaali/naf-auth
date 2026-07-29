@@ -24,7 +24,9 @@ export {
 export {
   verifyToken,
   verifyLogoutToken,
+  isTokenError,
   LOGOUT_PURPOSE,
+  TOKEN_ERRORS,
   CLOCK_SKEW_SECONDS,
   JWKS_TTL_SECONDS,
 } from './verify.js';
@@ -42,10 +44,22 @@ export {
 } from './safe.js';
 
 /**
- * المسارات العامة المكتوبة صراحةً: مسار الاستقبال، وصفحة الرفض، وفحص
- * الصحة. وأي مسار جديد خارج هذه القائمة محمي افتراضياً.
+ * المسارات العامة المكتوبة صراحةً: مسار الاستقبال، وإشعار الخروج الخلفي،
+ * وصفحة الرفض، وفحص الصحة. وأي مسار جديد خارج هذه القائمة محمي افتراضياً.
+ *
+ * وإشعارُ الخروج الخلفي منها لأن حراسته توقيعُ المركز لا جلسةُ متصفّح:
+ * المنادي خادمٌ لا متصفّح، ولا كوكي معه يُحرَس به. وحمايتُه بالوسيط تجعله
+ * يُردّ بتحويلةٍ إلى `‎/go/:id` — و`fetch` في المركز يتبعها، فتصل صفحةُ
+ * الواجهة بـ٢٠٠ ويقرأ المركزُ فشلَه نجاحاً، وتبقى الجلسة حيّة بلا سطر خطأ
+ * في أي سجلّ. والمسار مشتقٌّ في المركز حرفياً من `lib/backchannel.js`،
+ * فاسمه عقدٌ لا خيار.
  */
-const DEFAULT_PUBLIC_PATHS = ['/auth/callback', '/denied', '/health'];
+const DEFAULT_PUBLIC_PATHS = [
+  '/auth/callback',
+  '/auth/backchannel-logout',
+  '/denied',
+  '/health',
+];
 
 /** الأصول الساكنة — بادئات مُعلنة لا اجتهاد على الامتداد. */
 const DEFAULT_PUBLIC_PREFIXES = ['/assets/'];

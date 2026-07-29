@@ -216,6 +216,57 @@ test('رمز الجلسة المنتهي يُبطل الجلسة ويعيد ال
   });
 });
 
+// ────────── «عجزتُ عن الفحص» ليس «الرمز باطل» ──────────
+
+test('تعذّرُ جلب JWKS لا يمحو جلسةً صحيحة ويردّ ٥٠٣', async () => {
+  /* المخبأ يعيش خمس دقائق، فنافذةُ الاعتماد على الشبكة تتكرّر كل خمس دقائق
+     لكل منصة. ومحوُ الجلسة عند تعثّر المركز يعاقب عضواً لم يُخطئ، ويرسله
+     إلى المضيف المتعثّر نفسه ليدخل — فلا يعود بجلسة. */
+  const { kv, env, config } = setup({
+    member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
+  });
+  const good = await token();
+  const exp = Math.floor(Date.now() / 1000) + 900;
+  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: good, exp }));
+  await kv.put('usr:u1:s1', '1');
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response('bad gateway', { status: 502 });
+  try {
+    const { response, user } = await authenticate(req('/posts', 'naf_sid=s1'), env, config);
+
+    assert.equal(user, undefined, 'لا يمرّ الطلب بلا تحقّق');
+    assert.equal(response.status, 503, 'يقول «أعِد المحاولة» لا «سجّل الدخول»');
+    assert.equal(kv.store.has('sess:s1'), true, 'الجلسة تبقى: العطل في المركز لا في الرمز');
+    assert.equal(kv.store.has('usr:u1:s1'), true, 'ودليلُها معها');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('عودةُ المركز تُعيد الجلسة نفسها إلى العمل بلا دخولٍ جديد', async () => {
+  const { kv, env, config } = setup({
+    member: { id: 'u1', role: 'admin', is_active: 1, perms: null },
+  });
+  const good = await token();
+  const exp = Math.floor(Date.now() / 1000) + 900;
+  await kv.put('sess:s1', JSON.stringify({ sub: 'u1', token: good, exp }));
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response('bad gateway', { status: 502 });
+  try {
+    const first = await authenticate(req('/posts', 'naf_sid=s1'), env, config);
+    assert.equal(first.response.status, 503);
+  } finally {
+    globalThis.fetch = original;
+  }
+
+  await withFetch({}, async () => {
+    const { user } = await authenticate(req('/posts', 'naf_sid=s1'), env, config);
+    assert.deepEqual(user, { id: 'u1', role: 'admin', perms: null });
+  });
+});
+
 test('رمز موقّع بمفتاح آخر لا يمرّ ولو كانت الجلسة قائمة', async () => {
   const { kv, env, config } = setup({
     member: { id: 'u1', role: 'admin', is_active: 1, perms: null },

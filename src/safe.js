@@ -99,7 +99,15 @@ export function clearCookie(name) {
   return `${name}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`;
 }
 
-/** قراءة كوكي بالتقسيم لا بتعبير نمطي — اسم الكوكي لا يُقحَم في نمط. */
+/**
+ * قراءة كوكي بالتقسيم لا بتعبير نمطي — اسم الكوكي لا يُقحَم في نمط.
+ *
+ * وكوكيٌّ بالاسم نفسه قد يتكرّر: المتصفّح يرسل نسخةً لكل `Domain` و`Path`
+ * كتبتها، ولا يقول أيُّها من أين. فواحدٌ تالفٌ لا يُنهي البحث — يُتخطّى
+ * ويُكمَل إلى التالي. والوقوفُ عنده يُخرج صاحبَ جلسةٍ صحيحة لأن نسخةً
+ * قديمة بالاسم نفسه تعذّر فكّ ترميزها، وهي حالٌ لا يملك صاحبها إصلاحها
+ * إلا بمسح كوكيّات الموقع يدوياً.
+ */
 export function readCookie(request, name) {
   const header = request.headers.get('cookie');
   if (!header) return null;
@@ -110,7 +118,7 @@ export function readCookie(request, name) {
     try {
       return decodeURIComponent(part.slice(eq + 1).trim());
     } catch {
-      return null;
+      /* نسخةٌ تالفة بالاسم نفسه: تُتخطّى، والبحث يمضي. */
     }
   }
   return null;

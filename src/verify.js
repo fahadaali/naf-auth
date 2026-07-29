@@ -18,6 +18,45 @@ const CLOCK_SKEW_SECONDS = 60;
 /** الخوارزمية الوحيدة المقبولة. أي قيمة أخرى ترفض قبل أي عمل تعمية. */
 const ALG = 'RS256';
 
+/**
+ * مهلة جلب `JWKS`.
+ *
+ * بلا مهلة يرث الطلبُ مهلةَ المنصة كلها: مركزٌ يقبل الاتصال ولا يردّ يُعلّق
+ * كل طلب محميّ حتى ينفد وقت الـWorker، فيصل صاحبَه خطأ منصّة لا خطأ دخول.
+ * والمركز نفسه يضع ثلاث ثوانٍ على نداء الخروج الخلفي — وهذه الجهة أولى بها،
+ * فهي في المسار الحرج لكل طلب لا في إشعارٍ لاحق.
+ */
+const JWKS_TIMEOUT_MS = 3000;
+
+/**
+ * أخطاء الرمز نفسه — يقابلها أخطاءُ عجزِ المتحقّق (`jwks_unavailable`
+ * و`jwks_malformed` وما ليس `AuthError` أصلاً).
+ *
+ * والفرق ليس تصنيفاً: الوسيط يمحو الجلسة على الأولى ولا يمحوها على الثانية.
+ * «الرمز باطل» حكمٌ على الرمز، و«عجزتُ عن الفحص» حكمٌ على الشبكة — ومحوُ
+ * جلسةٍ صحيحة لأن المركز تعثّر لحظةً يُخرج أعضاءً لم يُخطئوا شيئاً.
+ */
+export const TOKEN_ERRORS = new Set([
+  'token_malformed',
+  'bad_alg',
+  'missing_kid',
+  'unknown_kid',
+  'bad_signature',
+  'bad_issuer',
+  'bad_audience',
+  'missing_exp',
+  'token_expired',
+  'token_not_yet_valid',
+  'token_from_future',
+  'missing_sub',
+  'wrong_token_type',
+]);
+
+/** هل هذا خطأُ رمزٍ باطل، أم عجزٌ عن التحقق؟ */
+export function isTokenError(err) {
+  return err instanceof AuthError && TOKEN_ERRORS.has(err.code);
+}
+
 function jwksUrl(issuer) {
   return `${normaliseIssuer(issuer)}/.well-known/jwks.json`;
 }
@@ -35,15 +74,34 @@ async function loadJwks(env, config, force = false) {
     if (cached && Array.isArray(cached.keys)) return cached;
   }
 
-  const res = await fetch(jwksUrl(config.issuer), {
-    headers: { accept: 'application/json' },
-  });
+  let res;
+  try {
+    res = await fetch(jwksUrl(config.issuer), {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(JWKS_TIMEOUT_MS),
+    });
+  } catch {
+    // انقطاعُ شبكةٍ أو نفادُ مهلة — عجزٌ عن التحقق لا رمزٌ باطل.
+    throw new AuthError('jwks_unavailable');
+  }
   if (!res.ok) throw new AuthError('jwks_unavailable');
 
-  const jwks = await res.json();
+  let jwks;
+  try {
+    jwks = await res.json();
+  } catch {
+    throw new AuthError('jwks_malformed');
+  }
   if (!jwks || !Array.isArray(jwks.keys)) throw new AuthError('jwks_malformed');
 
-  await kv.put(cacheKey, JSON.stringify(jwks), { expirationTtl: JWKS_TTL_SECONDS });
+  /* تعذّرُ الكتابة لا يُسقط تحقّقاً نجح.
+     المخبأ تسريعٌ لا شرط: الكتابة على مفتاح واحد ساخن قد تُردّ بحدّ معدّل
+     في KV، ورميُها من هنا يُبطل رمزاً سليماً بيد صاحبه — ويمحو جلسته. */
+  try {
+    await kv.put(cacheKey, JSON.stringify(jwks), { expirationTtl: JWKS_TTL_SECONDS });
+  } catch {
+    /* يمضي بلا مخبأ: الطلب التالي يجلب من جديد. */
+  }
   return jwks;
 }
 

@@ -20,6 +20,16 @@ function sessionTtl(exp) {
 }
 
 /**
+ * مهلة كل نداء إلى المركز.
+ *
+ * بلا مهلة يرث النداءُ مهلةَ الـWorker كلها: مركزٌ يقبل الاتصال ولا يردّ
+ * يُعلّق الدخول حتى ينفد وقت الطلب، فيصل صاحبَه خطأُ منصّة لا خطأُ دخول —
+ * وقد تمّت مصادقتُه فعلاً. والمركز نفسه يضع ثلاث ثوانٍ على نداء الخروج
+ * الخلفي، وهذه الجهة أولى بها.
+ */
+const CENTER_TIMEOUT_MS = 5000;
+
+/**
  * مبادلة رمز العبور بالرمز الموقّع — خادماً لخادم.
  *
  * أسماء الحقول هي أسماء المركز حرفياً: `platformId` و `secret` و `code`
@@ -36,16 +46,23 @@ async function exchangeCode(code, state, env, config) {
   const secret = env[config.secretBinding];
   if (!secret) throw new AuthError('secret_missing');
 
-  const res = await fetch(`${config.issuer}/api/token`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({
-      platformId: config.platformId,
-      secret,
-      code,
-      state,
-    }),
-  });
+  let res;
+  try {
+    res = await fetch(`${config.issuer}/api/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({
+        platformId: config.platformId,
+        secret,
+        code,
+        state,
+      }),
+      signal: AbortSignal.timeout(CENTER_TIMEOUT_MS),
+    });
+  } catch {
+    // انقطاعٌ أو نفادُ مهلة — ولا يُرفق سببٌ تقني، فالرمز يكفي للسجلّ.
+    throw new AuthError('exchange_unreachable');
+  }
 
   if (!res.ok) {
     // نصّ الاستجابة لا يُرفَق: قد يعيد المركز ما أُرسل إليه.
@@ -160,8 +177,12 @@ export async function handleCallback(request, env, config) {
        لا مرّة في كل طلب.
 
        وتعذّره لا يُسقط الدخول: العضو دخل، والناقص سطرٌ في لوحةٍ لا يراها.
-       فيُسجَّل ويمضي. */
-    await reportRoleOnLogin(env, config, claims, member);
+       فيُسجَّل ويمضي.
+
+       وموضعه بعد كتابة الجلسة لا قبلها: هو تبليغٌ للعرض وحده، وتقديمُه على
+       ما يُثبت الدخول يجعل تعثّرَ لوحةٍ لا يراها المستخدم يكلّفه دخوله —
+       فبين التبليغ وكتابة الجلسة تقع مهلةُ الشبكة كاملةً، وقد تنفد مهلةُ
+       الـWorker قبل أن يُكتب شيء. فيُكتب أولاً ما لا يُستغنى عنه. */
 
     // جلسة بمعرّف عشوائي، تحمل الرمز الموقّع نفسه: الوسيط يعيد التحقق منه
     // في كل طلب محمي، فلا تكون الجلسة أطول عمراً من الرمز الذي أنشأها.
@@ -180,6 +201,9 @@ export async function handleCallback(request, env, config) {
        فيُكتب مفتاحٌ فارغ اسمه يحمل الطرفين، وعمره عمر الجلسة نفسه فيذهب
        معها ولا يتراكم. */
     await config.kv(env).put(`usr:${claims.sub}:${sid}`, '1', { expirationTtl: ttl });
+
+    // الجلسة صارت ثابتة. والتبليغ بعدها — انظر شرحه فوق.
+    await reportRoleOnLogin(env, config, claims, member);
 
     // الوجهة تصل في الرابط وتعود في ردّ المبادلة. ما في الرابط أولى لأنه
     // ما طلبه هذا المتصفّح، وردّ المبادلة احتياطُه.
@@ -254,11 +278,17 @@ export async function reportAccessChange(env, config, { email, state, reason, ro
      لوحة المركز — قراءةً لا حكماً، ولا يُقرأ في أي قرار دخول. */
   if (hasRole) body.role = role.trim();
 
-  const res = await fetch(`${config.issuer}/api/internal/access`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(`${config.issuer}/api/internal/access`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(CENTER_TIMEOUT_MS),
+    });
+  } catch {
+    throw new AuthError('access_report_unreachable');
+  }
 
   if (!res.ok) throw new AuthError('access_report_failed', `تعذّر تبليغ المركز (${res.status})`);
   return true;
