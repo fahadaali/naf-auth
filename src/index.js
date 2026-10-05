@@ -165,8 +165,8 @@ export function createConfig(env, overrides = {}) {
     cookieName: overrides.cookieName || env.AUTH_COOKIE_NAME || 'naf_sid',
 
     // ولا `sessionTtlSeconds` هنا: عمر الجلسة ليس خياراً تضبطه المنصة،
-    // وإنما ما بقي من عمر الرمز الذي أنشأها. وأي عمر أطول يُبطل سريان
-    // الإيقاف المركزي خلال ربع ساعة.
+    // وإنما عمرُ جلسة المركز التي أصدرت رمز تجديدها، كما يردّه المركز.
+    // والرمز نفسه خمس عشرة دقيقة يُجدَّد صامتاً — انظر `refresh.js`.
 
     deniedPath: overrides.deniedPath || '/denied',
     publicPaths: overrides.publicPaths || DEFAULT_PUBLIC_PATHS,

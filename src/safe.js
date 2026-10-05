@@ -91,8 +91,10 @@ export function newSessionId() {
  * HttpOnly و Secure و SameSite=Lax و Path=/ — وبلا Domain مشترك بين المنصات،
  * لأن نطاقاً مشتركاً يجعل كوكي منصة صالحاً في أختها.
  */
+/** `null` عمراً يعني كوكيَّ جلسةِ تصفّح: يُمحى بإغلاق المتصفح. */
 export function sessionCookie(name, value, maxAgeSeconds) {
-  return `${name}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}`;
+  const base = `${name}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=Lax; Path=/`;
+  return maxAgeSeconds === null || maxAgeSeconds === undefined ? base : `${base}; Max-Age=${maxAgeSeconds}`;
 }
 
 export function clearCookie(name) {
