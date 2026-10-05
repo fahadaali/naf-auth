@@ -15,19 +15,13 @@ import {
 import { bindCookieName, deniedResponse, startLogin } from './middleware.js';
 import { upsertMember } from './store.js';
 import { verifyToken } from './verify.js';
+import { sessionLifetime } from './refresh.js';
 
-/**
- * عمر الجلسة = ما بقي من عمر الرمز.
- *
- * الرمز يعيش خمس عشرة دقيقة، وقِصَره هو ما يجعل الإيقاف المركزي يسري خلال
- * ربع ساعة. فجلسةٌ أطول منه تُبطل هذه الخاصية بالضبط: يبقى الموقوف مركزياً
- * داخلاً حتى ينتهي كوكيه لا حتى ينتهي رمزه.
- *
- * و`KV` لا يقبل عمراً أقلّ من ستين ثانية.
+/*
+ * عمر الجلسة يحكمه عمرُ جلسة المركز لا عمرُ الرمز الواحد — انظر
+ * `refresh.js`. والرمز نفسه يُتحقَّق منه في كل طلب ويُجدَّد كل ربع ساعة،
+ * فالإيقاف المركزي يسري خلال ربع ساعة كما كان.
  */
-function sessionTtl(exp) {
-  return Math.max(60, exp - Math.floor(Date.now() / 1000));
-}
 
 /**
  * مهلة كل نداء إلى المركز.
@@ -92,6 +86,11 @@ async function exchangeCode(code, state, env, config) {
     // تجزئةُ سرّ الربط كما خزّنها المركز مع الرمز. `null` تعني أن الرمز
     // صدر بلا ربط — انظر `checkBinding`.
     bind: typeof body.bind === 'string' && body.bind ? body.bind : null,
+    // رمز التجديد يبقى على خادم المنصة في الجلسة ولا يبلغ المتصفح. ومركزٌ
+    // لم يُحدَّث لا يرسله، فتعمل الجلسة كما كانت — انظر `refresh.js`.
+    refresh: typeof body.refresh === 'string' && body.refresh ? body.refresh : null,
+    refreshExpiresIn: Number(body.refreshExpiresIn),
+    remember: body.remember === true,
   };
 }
 
@@ -201,7 +200,8 @@ export async function handleCallback(request, env, config) {
   if (!state) return deniedResponse(request, config, config.reasons.badState);
 
   try {
-    const { token, next: exchangedNext, bind } = await exchangeCode(code, state, env, config);
+    const exchanged = await exchangeCode(code, state, env, config);
+    const { token, next: exchangedNext, bind } = exchanged;
 
     /* الربط يُفحص قبل أي أثر يُترك: قبل التحقق من الرمز وقبل إنشاء العضو
        وقبل فتح الجلسة. فمحاولةُ تثبيتٍ لا تُنشئ صفّاً ولا تكتب مفتاحاً. */
@@ -267,8 +267,8 @@ export async function handleCallback(request, env, config) {
        وموضعه هنا لا في المنصات: خمسٌ تكتبه خمس مرات، وأولها ينساه.
 
        ويُنتظر ولا يُطلق: مسار الاستقبال يبادل الرمز مع المركز أصلاً، فهذه
-       زيارةٌ ثانية إلى المضيف نفسه — والدخول يقع مرّة في اثنتي عشرة ساعة
-       لا مرّة في كل طلب.
+       زيارةٌ ثانية إلى المضيف نفسه — والدخول يقع مرّةً في عمر الجلسة لا
+       مرّة في كل طلب.
 
        وتعذّره لا يُسقط الدخول: العضو دخل، والناقص سطرٌ في لوحةٍ لا يراها.
        فيُسجَّل ويمضي.
@@ -279,14 +279,22 @@ export async function handleCallback(request, env, config) {
        الـWorker قبل أن يُكتب شيء. فيُكتب أولاً ما لا يُستغنى عنه. */
 
     // جلسة بمعرّف عشوائي، تحمل الرمز الموقّع نفسه: الوسيط يعيد التحقق منه
-    // في كل طلب محمي، فلا تكون الجلسة أطول عمراً من الرمز الذي أنشأها.
-    const ttl = sessionTtl(claims.exp);
+    // في كل طلب محمي، ويجدّده من المركز بالتجديد الصامت حين ينتهي.
+    const { ttl, cookieMaxAge } = sessionLifetime({
+      exp: claims.exp,
+      refresh: exchanged.refresh,
+      refreshExpiresIn: exchanged.refreshExpiresIn,
+      remember: exchanged.remember,
+    });
     const sid = newSessionId();
-    await config.kv(env).put(
-      await sessionKeyFor(sid),
-      JSON.stringify({ sub: claims.sub, token, exp: claims.exp }),
-      { expirationTtl: ttl },
-    );
+    const record = { sub: claims.sub, token, exp: claims.exp };
+    if (exchanged.refresh) {
+      record.refresh = exchanged.refresh;
+      record.remember = exchanged.remember;
+    }
+    await config.kv(env).put(await sessionKeyFor(sid), JSON.stringify(record), {
+      expirationTtl: ttl,
+    });
 
     /* ودليلٌ من العضو إلى جلساته.
        `sess:{sid}` مفتاحٌ لا يُستدلّ عليه بصاحبه، وهو الصواب — معرّف الجلسة
@@ -313,7 +321,7 @@ export async function handleCallback(request, env, config) {
     /* كوكيّان في ردٍّ واحد: الجلسة تُفتح، وسرُّ الربط يُمحى — أدّى عمله.
        و`Headers` لا كائنٌ عادي: مفتاح `set-cookie` لا يتكرّر في كائن. */
     const headers = new Headers({ location: next, 'cache-control': 'no-store' });
-    headers.append('set-cookie', sessionCookie(config.cookieName, sid, ttl));
+    headers.append('set-cookie', sessionCookie(config.cookieName, sid, cookieMaxAge));
     headers.append('set-cookie', clearBindCookie(config));
 
     return new Response(null, { status: 302, headers });

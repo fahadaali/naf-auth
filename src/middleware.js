@@ -13,6 +13,7 @@ import {
 } from './safe.js';
 import { getMember } from './store.js';
 import { isTokenError, verifyToken } from './verify.js';
+import { refreshSession } from './refresh.js';
 
 /**
  * أي مسار جديد محمي افتراضياً.
@@ -209,14 +210,14 @@ export async function authenticate(request, env, config) {
   const kv = config.kv(env);
   const session = await kv.get(await sessionKeyFor(sid), 'json');
 
-  // الجلسة المنتهية تعود إلى المركز ولا تجدّد نفسها، وإلا بقي الموقوف
-  // مركزياً يدخل حتى انتهاء كوكيه.
+  // الجلسة المنتهية في `KV` تعود إلى المركز. وعمرها عمرُ جلسة المركز التي
+  // أصدرت رمز تجديدها — انظر `refresh.js`.
   if (!session || !session.sub || !session.token) return { response: await noSession() };
 
   /* ═══ التحقق في كل طلب محمي، لا عند الاستقبال وحده ═══
      الرمز يعيش خمس عشرة دقيقة، وهذا الفحص هو ما يجعل لقِصَره معنى: بلا
      إعادة تحقّق تصير الجلسة المحلية هي الحقيقة، فيبقى من أُوقف مركزياً
-     داخلاً ما بقي كوكيه. والتجديد يمرّ بالمركز لا هنا.
+     داخلاً ما بقي كوكيه. والتجديد يسأل المركز ولا يُقرَّر هنا.
 
      ولا شبكة في المسار السويّ: المفاتيح مخبّأة في `KV`، فالكلفة قراءةُ
      مفتاح وتحقّقُ توقيع. */
@@ -243,6 +244,21 @@ export async function authenticate(request, env, config) {
        دقائق لكل منصة — وهي أكثر من أن تُترك لحكمٍ خاطئ. */
     if (!isTokenError(err)) return { response: unavailableResponse() };
 
+    /* ═══ رمزٌ انتهى عمره وفي الجلسة رمزُ تجديد ═══
+       يُجدَّد من المركز خادماً لخادم ويمضي الطلب — لا تحويلة ولا ٤٠١،
+       فلا تُعاد الشاشة المفتوحة ولا يضيع ما عليها. والمركز يعيد فحص
+       الحساب والوصول في كل تجديد، فرفضُه يُنهي الجلسة كما كان يُنهيها
+       انتهاءُ الرمز. انظر `refresh.js`. */
+    if (err.code === 'token_expired' && session.refresh) {
+      const renewed = await refreshSession(env, config, sid, session);
+      if (renewed.unavailable) return { response: unavailableResponse() };
+      if (renewed.claims) {
+        claims = renewed.claims;
+      }
+    }
+  }
+
+  if (!claims) {
     await kv.delete(await sessionKeyFor(sid));
     await kv.delete(await userIndexKeyFor(session.sub, sid));
     return { response: await noSession() };
